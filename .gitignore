@@ -1,0 +1,18 @@
+# Build artifacts (skill binaries are built via `make`)
+/bin/
+
+# Per-machine toggle map (gitignored per AGENTS.md)
+skills.local.json
+
+# Secrets — never commit (placed next to skill binaries)
+.env
+**/.env
+
+# JS/TS dependencies (built inside extension dirs, exposed via symlink)
+node_modules/
+
+# Local agent state
+.superpi/
+
+# OS / editor cruft
+.DS_Store
