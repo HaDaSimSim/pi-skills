@@ -6,8 +6,13 @@
 //   2. 각 자식이 끝나면 그 "최종 출력만" 메인 에이전트에 주입한다(컨텍스트 절약).
 //   3. 자식의 전체 트랜스크립트(thinking·툴호출 포함)는 세션에 custom 엔트리로
 //      영속 저장된다. LLM 컨텍스트엔 절대 안 들어가고, 디스크(세션 jsonl)에만 남는다.
-//   4. Ctrl+X 로 subagent view 오버레이를 띄워 과거 run 들을 조회한다. 세션에서
+//   4. Ctrl+\ 로 subagent view 오버레이를 띄워 과거 run 들을 조회한다. 세션에서
 //      복원하므로 pi 를 껐다 켜도 같은 세션을 열면 계속 볼 수 있다(opencode 스타일).
+//      ↑↓ / j k / space·b / g·G 키로 스크롤(터미널 마우스 전달에 의존하지 않는다). 트랜스크립트 텍스트는 렌더 전 TAB/제어문자를
+//      제거해 pi-tui 폭 계산 불일치로 인한 렌더 크래시를 막는다(sanitizeForRender).
+//   5. 진행 중인 자식은 send_to_subagent 로 follow-up 을 큐잉(steering)하고,
+//      abort_subagent 로 중단할 수 있다. 완료·실패·중단은 모두 메인에게 메시지로 알림이
+//      가므로, 메인은 sleep/폴링 없이 그냥 일을 이어가거나 멈춰 있으면 된다.
 //
 // 자식 실행: pi --mode json -p --session-dir <격리> --session-id <runId>
 //   (격리 세션으로 멀티턴 context 유지, 메인 /resume 목록은 오염 안 됨)
@@ -17,7 +22,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, type ExtensionContext, type Theme, getAgentDir, rawKeyHint } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { type AgentToolResult, type ExtensionAPI, type ExtensionContext, type Theme, getAgentDir, rawKeyHint } from "@earendil-works/pi-coding-agent";
 import { type Focusable, type TUI, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentScope, discoverAgents, formatAgentList } from "./agents.ts";
@@ -89,6 +95,35 @@ function newId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+// 터미널 렌더용 텍스트 정화. 리터럴 TAB 과 그 외 C0 제어문자는 pi-tui 의 폭 계산
+// (visibleWidth 는 TAB=3 으로 세지만 compositor 의 sliceByColumn 은 그대로 흘려보내
+// 폭이 어긋난다)을 깨뜨려 "Rendered line exceeds terminal width" 크래시를 유발한다.
+// 표시 전에 TAB→공백 확장, 그 외 제어문자는 제거해 두 계산이 항상 일치하게 만든다.
+// 캡처 시점에 적용하므로 세션에 영속되는 데이터도 깨끗하다.
+export function sanitizeForRender(text: string): string {
+  if (!text) return text;
+  let out = "";
+  let col = 0;
+  for (const ch of text) {
+    if (ch === "\t") {
+      // 탭을 다음 4칸 경계까지 공백으로 확장.
+      const n = 4 - (col % 4);
+      out += " ".repeat(n);
+      col += n;
+    } else if (ch === "\n") {
+      out += ch;
+      col = 0;
+    } else {
+      const code = ch.codePointAt(0) ?? 0;
+      // C0 제어문자(\n 제외)와 DEL 제거. 그 외는 보존(폭 계산은 pi-tui 에 위임).
+      if ((code >= 0x00 && code < 0x20) || code === 0x7f) continue;
+      out += ch;
+      col += 1;
+    }
+  }
+  return out;
+}
+
 // 자식 subagent 세션을 보관하는 격리 디렉터리. 메인 cwd 기반 세션 폴더와 분리되어
 // /resume 목록을 오염하지 않는다.
 function subagentSessionRoot(): string {
@@ -135,10 +170,10 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 export function flattenAssistant(msg: AssistantMessage): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   for (const c of msg.content) {
-    if (c.type === "thinking" && c.thinking?.trim()) items.push({ kind: "thinking", text: c.thinking });
-    else if (c.type === "text" && c.text?.trim()) items.push({ kind: "text", text: c.text });
+    if (c.type === "thinking" && c.thinking?.trim()) items.push({ kind: "thinking", text: sanitizeForRender(c.thinking) });
+    else if (c.type === "text" && c.text?.trim()) items.push({ kind: "text", text: sanitizeForRender(c.text) });
     else if (c.type === "toolCall")
-      items.push({ kind: "toolCall", text: formatToolCallArgs(c.name, c.arguments ?? {}), toolName: c.name });
+      items.push({ kind: "toolCall", text: sanitizeForRender(formatToolCallArgs(c.name, c.arguments ?? {})), toolName: c.name });
   }
   return items;
 }
@@ -226,6 +261,9 @@ export function runSubagentTurn(
         cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
+        // 자식 subagent 프로세스임을 마킹. 자식 pi 안에서도 로드되는 다른 익스텐션
+        // (예: telegram)이 자식의 agent_end 에 반응해 이중 알림을 보내는 걸 막는다.
+        env: { ...process.env, PI_SUBAGENT: "1" },
       });
     } catch (e) {
       run.status = "failed";
@@ -277,7 +315,7 @@ export function runSubagentTurn(
             .trim();
           turn.transcript.push({
             kind: "toolResult",
-            text: text.length > 500 ? text.slice(0, 500) + "…" : text,
+            text: sanitizeForRender(text.length > 500 ? text.slice(0, 500) + "…" : text),
             toolName: tr.toolName,
           });
         }
@@ -301,7 +339,12 @@ export function runSubagentTurn(
       run.endedAt = turn.endedAt;
       turn.finalOutput = finalOutputFrom(turn.transcript);
       run.finalOutput = turn.finalOutput;
-      if (code === 0 || turn.finalOutput) {
+      if (signal?.aborted) {
+        // 명시적 abort: 부분 출력이 있어도 done 으로 됕지 않는다(상태 결정적).
+        run.status = "failed";
+        run.error = "aborted";
+        turn.error = "aborted";
+      } else if (code === 0 || turn.finalOutput) {
         run.status = "done";
       } else {
         run.status = "failed";
@@ -369,6 +412,13 @@ const SubagentParams = Type.Object({
 export default function (pi: ExtensionAPI) {
   // 메모리상의 진행 중/완료 run 들. 세션 복원 시 디스크에서 채운다.
   const runs = new Map<string, SubagentRun>();
+  // 진행 중인 run 의 AbortController. abort_subagent 가 이걸 불러 자식을 죽인다.
+  const controllers = new Map<string, AbortController>();
+  // 진행 중인 run 에 대기 중인 follow-up 프롬프트 큐(steering). 현재 turn 이 끝나면 순서대로 소비.
+  const pendingFollowUps = new Map<string, string[]>();
+  // steer 요청: 현재 turn 을 abort 하고 그 즉시 이 메시지로 새 turn 을 시작한다.
+  // abort 후 executeTurn 의 완료 콜백에서 소비된다(pendingFollowUps 보다 우선).
+  const steerRequests = new Map<string, string>();
   let renderViewer: (() => void) | undefined; // 열린 뷰어가 있으면 갱신용
 
   // 진행 표시 widget 갱신
@@ -377,14 +427,20 @@ export default function (pi: ExtensionAPI) {
     const all = [...runs.values()];
     const running = all.filter((r) => r.status === "running").length;
     // run 이 하나라도 있으면 뷰어 단축키 hint 를 footer 에 노출한다.
-    const viewHint = all.length > 0 ? rawKeyHint(VIEW_SHORTCUT, "view subagents") : "";
-    if (running > 0) {
-      const label = ctx.ui.theme.fg("dim", `🤖 ${running} subagent${running > 1 ? "s" : ""} running`);
-      ctx.ui.setStatus("subagents", viewHint ? `${label} ${viewHint}` : label);
-    } else if (all.length > 0) {
-      ctx.ui.setStatus("subagents", viewHint);
-    } else {
-      ctx.ui.setStatus("subagents", undefined);
+    // rawKeyHint / ctx.ui.theme 는 TUI theme(initTheme) 에 의존한다. pi-web 같은
+    // 비-TUI 호스트는 hasUI=true 여도 theme 가 없어 throw 하므로 전체를 방어한다.
+    try {
+      const viewHint = all.length > 0 ? rawKeyHint(VIEW_SHORTCUT, "view subagents") : "";
+      if (running > 0) {
+        const label = ctx.ui.theme.fg("dim", `🤖 ${running} subagent${running > 1 ? "s" : ""} running`);
+        ctx.ui.setStatus("subagents", viewHint ? `${label} ${viewHint}` : label);
+      } else if (all.length > 0) {
+        ctx.ui.setStatus("subagents", viewHint);
+      } else {
+        ctx.ui.setStatus("subagents", undefined);
+      }
+    } catch {
+      /* 비-TUI 호스트(theme 미초기화): widget 갱신은 조용히 건너뛴다. */
     }
   };
 
@@ -396,6 +452,8 @@ export default function (pi: ExtensionAPI) {
   // 한 turn 을 실행한다(최초 task 또는 follow-up 공통). 완료되면 미수령 turn 으로
   // 표시하고, 메인 에이전트에 "수령하라"는 짧은 알림만 보낸다(전문 주입 X).
   const executeTurn = async (run: SubagentRun, prompt: string, ctx: ExtensionContext) => {
+    const controller = new AbortController();
+    controllers.set(run.runId, controller);
     let promptFile: string | null = null;
     let tmpDir: string | null = null;
     try {
@@ -404,30 +462,72 @@ export default function (pi: ExtensionAPI) {
         promptFile = tmp.filePath;
         tmpDir = tmp.dir;
       }
-      await runSubagentTurn(run, prompt, promptFile, ctx.cwd, undefined, () => {
+      await runSubagentTurn(run, prompt, promptFile, ctx.cwd, controller.signal, () => {
         persistRun(run);
         updateWidget(ctx);
         renderViewer?.();
       });
     } finally {
       if (tmpDir) fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      controllers.delete(run.runId);
     }
+
+    const aborted = controller.signal.aborted;
 
     // 방금 끝난 turn 인덱스를 미수령 목록에 추가.
     const turnIndex = run.turns.length - 1;
     if (!run.unreadTurns.includes(turnIndex)) run.unreadTurns.push(turnIndex);
     persistRun(run);
 
+    // steer 요청으로 abort 된 경우: 중단된 큐는 버리고, 그 즉시 새 메시지로 이어 돌린다.
+    // (중단 알림은 보내지 않고, 새 turn 의 완료 알림만 간다.)
+    const steerMsg = steerRequests.get(run.runId);
+    if (aborted && steerMsg !== undefined) {
+      steerRequests.delete(run.runId);
+      pendingFollowUps.delete(run.runId);
+      void executeTurn(run, steerMsg, ctx);
+      updateWidget(ctx);
+      return;
+    }
+    // steer 가 아닌 그냥 abort 이면 혹시 남은 steer 요청·대기 큐를 정리.
+    if (aborted) {
+      steerRequests.delete(run.runId);
+      pendingFollowUps.delete(run.runId);
+    }
+
+    // 대기 중인 follow-up(steering)이 있으면 이어서 돌린다(정상 완료 시에만).
+    const queue = pendingFollowUps.get(run.runId);
+    if (!aborted && queue && queue.length > 0) {
+      const next = queue.shift();
+      if (queue.length === 0) pendingFollowUps.delete(run.runId);
+      if (next !== undefined) {
+        void executeTurn(run, next, ctx);
+        updateWidget(ctx);
+        return;
+      }
+    }
+
     // 전문 대신 "수령하라"는 알림만 보낸다.
-    const status = run.status === "done" ? "finished" : "failed";
-    const note =
-      run.status === "done"
-        ? `Subagent "${run.title}" (id: ${run.runId}) ${status}. ${run.unreadTurns.length} unread response(s). ` +
-          `Call fetch_subagent_result with subagentId "${run.runId}" to read the output, ` +
-          `or send_to_subagent to continue the conversation.`
-        : `Subagent "${run.title}" (id: ${run.runId}) ${status}: ${run.error || "unknown error"}. ` +
-          `Call fetch_subagent_result with subagentId "${run.runId}" for details.`;
-    pi.sendUserMessage(`[subagent ${run.runId} ${status}] ${note}`, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+    // 절충안: 실패는 메인이 빨리 알수록 좋으므로 steer(현재 턴 툴 실행 후 즉시 끜어듦),
+    // 성공은 급하지 않으므로 followUp(턴이 다 끝난 뒤 전달). idle 이면 둘 다 즉시.
+    const status = aborted ? "aborted" : run.status === "done" ? "finished" : "failed";
+    let note: string;
+    if (aborted) {
+      note =
+        `Subagent "${run.title}" (id: ${run.runId}) was aborted. ` +
+        `Partial output (if any) is available via fetch_subagent_result with subagentId "${run.runId}".`;
+    } else if (run.status === "done") {
+      note =
+        `Subagent "${run.title}" (id: ${run.runId}) ${status}. ${run.unreadTurns.length} unread response(s). ` +
+        `Call fetch_subagent_result with subagentId "${run.runId}" to read the output, ` +
+        `or send_to_subagent to continue the conversation.`;
+    } else {
+      note =
+        `Subagent "${run.title}" (id: ${run.runId}) ${status}: ${run.error || "unknown error"}. ` +
+        `Call fetch_subagent_result with subagentId "${run.runId}" for details.`;
+    }
+    const deliverAs = run.status === "done" && !aborted ? "followUp" : "steer";
+    pi.sendUserMessage(`[subagent ${run.runId} ${status}] ${note}`, ctx.isIdle() ? undefined : { deliverAs });
     updateWidget(ctx);
   };
 
@@ -439,8 +539,8 @@ export default function (pi: ExtensionAPI) {
       "Spawn one or more subagents that run CONCURRENTLY IN THE BACKGROUND.",
       "Returns immediately — you are NOT blocked and should continue working.",
       "Each subagent runs in an isolated context and keeps its own session, so you can continue the conversation later.",
-      "When a subagent finishes you receive a SHORT notification with its id — not the full output.",
-      "Call fetch_subagent_result with that id to read the response, and send_to_subagent to ask it follow-up questions.",
+      "When a subagent finishes you receive a SHORT notification with its id — not the full output. This notification arrives on its own; do NOT sleep or poll waiting for it.",
+      "Call fetch_subagent_result with that id to read the response, send_to_subagent to ask follow-ups (queued if it is still running), and abort_subagent to stop one early.",
       "Use list_subagents to see all runs and which have unread responses.",
       "Each task may name an `agent` (a discovered preset with its own system prompt, tools, and default model),",
       "and/or set a `model` override. Omit `agent` to run a bare subagent with full tool access controlled only by `model`.",
@@ -451,8 +551,9 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use spawn_subagents to delegate independent tasks that can run in parallel without blocking you.",
       "Pick a specialized agent when one fits; otherwise omit agent and just set a model (use 'current' to match yourself).",
-      "After spawning, keep working. When you get a '[subagent <id> finished]' notification, call fetch_subagent_result with that id to read the output.",
-      "To ask a subagent a follow-up, call send_to_subagent with its id — the subagent keeps full context of its prior turns.",
+      "After spawning, just keep working or end your turn normally. Do NOT poll, and never run sleep/wait to pass time — when a subagent finishes, pi delivers a '[subagent <id> finished]' message to you automatically, even if you stopped.",
+      "When you get a '[subagent <id> finished]' notification, call fetch_subagent_result with that id to read the output.",
+      "To ask a subagent a follow-up, call send_to_subagent with its id (it works even while the subagent is still running — the message is queued). Use abort_subagent to stop one early.",
     ],
     parameters: SubagentParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -497,7 +598,7 @@ export default function (pi: ExtensionAPI) {
 
         const label = agent?.name ?? `model:${model}`;
         const runId = newId();
-        const title = t.title.trim() || t.task.slice(0, 60);
+        const title = sanitizeForRender(t.title.trim() || t.task.slice(0, 60)).replace(/\n/g, " ");
         const run: SubagentRun = {
           runId,
           batchId,
@@ -531,8 +632,8 @@ export default function (pi: ExtensionAPI) {
       if (accepted.length > 0) {
         lines.push(
           `Started ${accepted.length} subagent(s) in the background: ${accepted.join(", ")}.`,
-          `They run concurrently. You are NOT blocked — keep working.`,
-          `When each finishes you'll get a '[subagent <id> finished]' notification; call fetch_subagent_result with that id to read the output.`,
+          `They run concurrently. You are NOT blocked — keep working or end your turn.`,
+          `When each finishes you'll get a '[subagent <id> finished]' message automatically — do not sleep or poll. Then call fetch_subagent_result with that id to read the output.`,
         );
       }
       if (unknownAgents.length > 0) {
@@ -562,10 +663,10 @@ export default function (pi: ExtensionAPI) {
       "Use this to find a subagent's id before calling fetch_subagent_result or send_to_subagent.",
     promptSnippet: "List subagent runs and their unread status",
     parameters: Type.Object({}),
-    async execute() {
+    async execute(): Promise<AgentToolResult<Record<string, unknown>>> {
       const all = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt);
       if (all.length === 0) {
-        return { content: [{ type: "text", text: "No subagents in this session yet." }] };
+        return { content: [{ type: "text", text: "No subagents in this session yet." }], details: {} };
       }
       const lines = all.map((r) => {
         const unread = r.unreadTurns.length > 0 ? ` · ${r.unreadTurns.length} unread` : "";
@@ -589,7 +690,7 @@ export default function (pi: ExtensionAPI) {
         Type.Boolean({ description: "If true, return all turns, not just unread ones. Default false." }),
       ),
     }),
-    async execute(_id, params) {
+    async execute(_id, params): Promise<AgentToolResult<Record<string, unknown>>> {
       const run = runs.get(params.subagentId);
       if (!run) {
         return {
@@ -641,15 +742,24 @@ export default function (pi: ExtensionAPI) {
     label: "Send To Subagent",
     description:
       "Send a follow-up message to an existing subagent by its id. The subagent resumes its OWN session, so it keeps full context of all prior turns. " +
-      "Runs in the background like spawn_subagents; when it finishes you get a '[subagent <id> finished]' notification, then call fetch_subagent_result. " +
-      "The subagent must not be currently running.",
-    promptSnippet: "Send a follow-up prompt to an existing subagent by id",
+      "If the subagent is IDLE, the message runs immediately. If it is RUNNING, behavior depends on `deliverAs`: " +
+      "`followUp` (default) queues the message and runs it after the current turn finishes; " +
+      "`steer` aborts the current turn right now and immediately starts a new turn with your message (interrupt + redirect). " +
+      "Either way it runs in the background; when it finishes you get a '[subagent <id> finished]' notification, then call fetch_subagent_result.",
+    promptSnippet: "Send a follow-up to a subagent (followUp to queue, steer to interrupt)",
     promptGuidelines: [
       "Use send_to_subagent to continue a conversation with a subagent that already ran — it remembers its prior turns.",
+      "send_to_subagent works whether the subagent is idle or running. For a running one, use deliverAs='followUp' to let the current turn finish first, or deliverAs='steer' to interrupt it now and redirect. Do not poll or sleep waiting.",
     ],
     parameters: Type.Object({
       subagentId: Type.String({ description: "The subagent run id to continue." }),
       message: Type.String({ description: "The follow-up prompt/instruction for the subagent." }),
+      deliverAs: Type.Optional(
+        StringEnum(["followUp", "steer"] as const, {
+          description:
+            "How to deliver when the subagent is still running. 'followUp' (default) queues after the current turn; 'steer' aborts the current turn and starts a new one immediately. Ignored when the subagent is idle.",
+        }),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const run = runs.get(params.subagentId);
@@ -659,13 +769,48 @@ export default function (pi: ExtensionAPI) {
           details: { found: false },
         };
       }
+      const deliverAs = params.deliverAs ?? "followUp";
       if (run.status === "running") {
+        if (deliverAs === "steer") {
+          // 현재 turn 을 즉시 중단하고, 끝나면 이 메시지로 새 turn 을 시작한다.
+          // 중단 전에 올라온 대기 큐는 비우고(steer 가 우선), 이 메시지만 단독으로 넓는다.
+          // executeTurn 은 abort 시 큐를 지우므로, abort 가 처리된 뒤 의 완료 콜백에서
+          // 이어달린다. 경주 조건: abort 후 executeTurn 이 pendingFollowUps 를 비우므로,
+          // 여기서 큐를 설정해도 지워진다. 따라서 steer 는 "abort 완료를 기다렸다가 새 turn"
+          // 을 한번에 처리하는 전용 대기자를 둔다.
+          steerRequests.set(run.runId, params.message);
+          const controller = controllers.get(run.runId);
+          controller?.abort();
+          updateWidget(ctx);
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `Steering subagent "${run.title}" (${run.runId}): aborting the current turn and restarting with your message. ` +
+                  `You'll get a '[subagent ${run.runId} finished]' notification when the new turn completes. Keep working — no need to wait.`,
+              },
+            ],
+            details: { found: true, running: true, steered: true },
+          };
+        }
+        // followUp: 큐에 넣어 현재 turn 이 끝난 뒤 자동으로 이어 돌린다.
+        const queue = pendingFollowUps.get(run.runId) ?? [];
+        queue.push(params.message);
+        pendingFollowUps.set(run.runId, queue);
         return {
-          content: [{ type: "text", text: `Subagent "${run.title}" (${run.runId}) is still running. Wait for it to finish before sending a follow-up.` }],
-          details: { found: true, running: true },
+          content: [
+            {
+              type: "text",
+              text:
+                `Subagent "${run.title}" (${run.runId}) is running; your message was QUEUED (position ${queue.length}) and will run after the current turn finishes. ` +
+                `You'll get a '[subagent ${run.runId} finished]' notification when it completes. Keep working — no need to wait.`,
+            },
+          ],
+          details: { found: true, running: true, queued: true, queueLength: queue.length },
         };
       }
-      // 백그라운드 재실행 — 같은 세션을 이어간다.
+      // idle: 백그라운드 재실행 — 같은 세션을 이어간다.
       void executeTurn(run, params.message, ctx);
       updateWidget(ctx);
       return {
@@ -676,6 +821,61 @@ export default function (pi: ExtensionAPI) {
           },
         ],
         details: { found: true, subagentId: run.runId },
+      };
+    },
+  });
+
+  // ── 도구: abort_subagent (id 로 진행 중인 자식을 중단) ─────────────
+  pi.registerTool({
+    name: "abort_subagent",
+    label: "Abort Subagent",
+    description:
+      "Abort a currently running subagent by its id. Kills the child process; any partial output is kept and remains readable via fetch_subagent_result. " +
+      "Also clears any queued follow-up messages for that subagent. No effect if the subagent is not running.",
+    promptSnippet: "Abort a running subagent by id",
+    promptGuidelines: [
+      "Use abort_subagent to stop a runaway or no-longer-needed subagent; it stops the run but keeps whatever it produced so far.",
+    ],
+    parameters: Type.Object({
+      subagentId: Type.String({ description: "The subagent run id to abort." }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const run = runs.get(params.subagentId);
+      if (!run) {
+        return {
+          content: [{ type: "text", text: `No subagent found with id "${params.subagentId}". Use list_subagents to see ids.` }],
+          details: { found: false },
+        };
+      }
+      const controller = controllers.get(run.runId);
+      // 대기 중인 follow-up 과 steer 요청도 함께 비운다(abort 는 사용자의 명시적 중단).
+      const hadQueue = (pendingFollowUps.get(run.runId)?.length ?? 0) > 0 || steerRequests.has(run.runId);
+      pendingFollowUps.delete(run.runId);
+      steerRequests.delete(run.runId);
+      if (!controller || run.status !== "running") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Subagent "${run.title}" (${run.runId}) is not running (status: ${run.status}).${hadQueue ? " Cleared its queued follow-up(s)." : ""}`,
+            },
+          ],
+          details: { found: true, running: false, clearedQueue: hadQueue },
+        };
+      }
+      controller.abort();
+      updateWidget(ctx);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Aborting subagent "${run.title}" (${run.runId}). The child process is being stopped; ` +
+              `partial output (if any) stays readable via fetch_subagent_result.${hadQueue ? " Queued follow-up(s) cleared." : ""} ` +
+              `You'll get a '[subagent ${run.runId} aborted]' notification shortly.`,
+          },
+        ],
+        details: { found: true, aborted: true, clearedQueue: hadQueue },
       };
     },
   });
@@ -761,6 +961,11 @@ class SubagentViewer implements Focusable {
     private done: (r: void) => void,
   ) {}
 
+  // detail 모드 한 페이지 높이(스크롤 단위). header/footer 여유를 뺀 근사치.
+  private get pageStep(): number {
+    return Math.max(3, this.rows - 4);
+  }
+
   // 터미널 높이 (오버레이가 풀스크린이므로 전체 rows 사용, 약간의 여유만 남김).
   private get rows(): number {
     return Math.max(8, (this.tui.terminal.rows || 30) - 1);
@@ -777,19 +982,28 @@ class SubagentViewer implements Focusable {
       return;
     }
     if (this.mode === "list") {
-      if (matchesKey(data, "up")) this.selected = Math.max(0, this.selected - 1);
-      else if (matchesKey(data, "down")) this.selected = Math.min(this.runs.length - 1, this.selected + 1);
-      else if (matchesKey(data, "pageUp")) this.selected = Math.max(0, this.selected - 10);
-      else if (matchesKey(data, "pageDown")) this.selected = Math.min(this.runs.length - 1, this.selected + 10);
+      // 리스트: ↑↓ / j k 로 선택 이동, PgUp/PgDn / space b 로 점프, g/G 로 처음·끝.
+      const last = this.runs.length - 1;
+      if (matchesKey(data, "up") || data === "k") this.selected = Math.max(0, this.selected - 1);
+      else if (matchesKey(data, "down") || data === "j") this.selected = Math.min(last, this.selected + 1);
+      else if (matchesKey(data, "pageUp") || data === "b") this.selected = Math.max(0, this.selected - 10);
+      else if (matchesKey(data, "pageDown") || data === " ") this.selected = Math.min(last, this.selected + 10);
+      else if (data === "g" || matchesKey(data, "home")) this.selected = 0;
+      else if (data === "G" || matchesKey(data, "end")) this.selected = last;
       else if (matchesKey(data, "return")) {
         this.mode = "detail";
         this.scroll = 0;
       }
     } else {
-      if (matchesKey(data, "up")) this.scroll = Math.max(0, this.scroll - 1);
-      else if (matchesKey(data, "down")) this.scroll += 1;
-      else if (matchesKey(data, "pageUp")) this.scroll = Math.max(0, this.scroll - 10);
-      else if (matchesKey(data, "pageDown")) this.scroll += 10;
+      // 디테일: ↑↓ / j k 로 한 줄, PgUp/PgDn / space b 로 한 페이지, g/G 로 처음·끝.
+      // 아래쪽 상한은 render 가 maxScroll 로 다시 clamp 하므로 여기서는 크게 잡아도 된다.
+      const page = this.pageStep;
+      if (matchesKey(data, "up") || data === "k") this.scroll = Math.max(0, this.scroll - 1);
+      else if (matchesKey(data, "down") || data === "j") this.scroll += 1;
+      else if (matchesKey(data, "pageUp") || data === "b") this.scroll = Math.max(0, this.scroll - page);
+      else if (matchesKey(data, "pageDown") || data === " ") this.scroll += page;
+      else if (data === "g" || matchesKey(data, "home")) this.scroll = 0;
+      else if (data === "G" || matchesKey(data, "end")) this.scroll = Number.MAX_SAFE_INTEGER; // render 가 maxScroll 로 clamp
     }
   }
 
@@ -800,7 +1014,7 @@ class SubagentViewer implements Focusable {
       th.fg("accent", " 🤖 Subagent runs") + th.fg("dim", `  (${this.runs.length})`),
       "",
     ];
-    const footer = th.fg("dim", ` ↑↓ select · PgUp/PgDn · Enter open · Esc/${formatKeyLabel(VIEW_SHORTCUT)} close`);
+    const footer = th.fg("dim", ` ↑↓/jk select · space/b page · g/G ends · Enter open · Esc/${formatKeyLabel(VIEW_SHORTCUT)} close`);
     const viewport = Math.max(2, rows - header.length - 1); // 1 = footer
 
     // 각 run 은 2줄(제목 + 메타). 선택 항목이 뷰포트 안에 들어오도록 스크롤 행을 맞춘다.
@@ -856,7 +1070,7 @@ class SubagentViewer implements Focusable {
         body.push(th.fg("accent", `  ▸ turn ${ti + 1}`));
       }
       body.push(th.fg("dim", `  📤 prompt`));
-      for (const raw of turn.prompt.split("\n")) {
+      for (const raw of sanitizeForRender(turn.prompt).split("\n")) {
         for (const w of wrapTextWithAnsi(raw, innerW - 4)) body.push("    " + th.fg("muted", w));
       }
       for (const item of turn.transcript) {
@@ -879,7 +1093,7 @@ class SubagentViewer implements Focusable {
 
     const footer = th.fg(
       "dim",
-      ` ↑↓/PgUp/PgDn scroll · Esc back  [${body.length === 0 ? 0 : this.scroll + 1}-${this.scroll + slice.length}/${body.length}]`,
+      ` ↑↓/jk scroll · space/b page · g/G ends · Esc back  [${body.length === 0 ? 0 : this.scroll + 1}-${this.scroll + slice.length}/${body.length}]`,
     );
     const lines = [...head, ...slice];
     while (lines.length < rows - 1) lines.push("");

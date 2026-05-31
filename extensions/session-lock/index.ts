@@ -16,6 +16,18 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SessionLock, type LockRecord } from "./shared/session-lock.ts";
 
 export default function (pi: ExtensionAPI) {
+  // 자식 subagent 프로세스(`pi -p`, ꈁ리 세션)에서는 세션락을 걸지 않는다.
+  // 자식은 ~/.pi/agent/.subagent-sessions/ ꈁ리 디렉터리에서 돌아 웹이나 다른 TUI 가
+  // 그 세션을 잡을 일이 없다. 락은 불필요한 락 파일 노이즈만 남긴다.
+  // subagents 익스텐션이 자식 env 에 PI_SUBAGENT=1 을 박는다.
+  if (process.env.PI_SUBAGENT) return;
+
+  // pi-web/pi-gui 호스트가 띄운 런타임에서는 호스트가 이미 SessionLock 을 직접
+  // 관리한다(owner="pi-web"). 그때 이 익스텐션까지 또 같은 파일에 락을 걸면
+  // 두 홀더가 생겨서, 정작 그 런타임의 tool 을 "held elsewhere" 로 차단하는
+  // 자가당착에 빠진다. 호스트가 PI_WEB_HOST=1 을 박으면 여기서 빠진다.
+  if (process.env.PI_WEB_HOST) return;
+
   let lock: SessionLock | null = null;
 
   const fmtOwner = (r?: LockRecord) =>
@@ -59,9 +71,14 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // 메시지 보내기 직전: 락 확인 (핵심 강제 지점)
-  pi.on("before_agent_start", async (_event, ctx) => {
+  // Message guard: check the lock right when the user submits input. This is
+  // the real enforcement point — the `input` event can consume the input
+  // (action: "handled") so it never reaches the agent or this session file.
+  // (before_agent_start cannot cancel; it can only patch the prompt.)
+  pi.on("input", async (event, ctx) => {
     if (!lock) return;
+    // Let extension-injected messages through; only guard real user input.
+    if (event.source === "extension") return;
     if (lock.isMine()) return; // 통과
 
     // 내 락이 아니다 — 한번도 안 잡았거나(read-only), 잡았다가 잃었거나(lost).
@@ -76,7 +93,7 @@ export default function (pi: ExtensionAPI) {
       setLockStatus(ctx, "🔒 read-only");
       ctx.ui.notify("No lock held; cannot send messages.", "warning");
     }
-    return { cancel: true }; // 에이전트 시작 차단 → 이 세션 파일에 쓰지 않음
+    return { action: "handled" as const }; // consume input → not sent to agent
   });
 
   // 도구 실행 직전에도 동일 가드 (파일 변경 도구 보호)
