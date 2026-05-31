@@ -1,11 +1,39 @@
 # Extensions
 
-pi extensions tracked by this repo. Built/installed alongside skills via
-the top-level `Makefile` so a single `make install` keeps both in sync with
-`~/.pi/agent/`.
+TypeScript pi extensions. Unlike skills (built Go binaries that are copied),
+extensions are **symlinked** into `~/.pi/agent/extensions/` on `make install` —
+pi follows the link and runs the TS source directly via jiti.
 
-This directory is empty by default — drop new extensions in here and add the
-name to `ALL_EXTENSIONS` in the `Makefile`.
+Because it's a symlink, edits in this repo are live on the next `/reload`; no
+re-install. The flip side: the repo must stay put — move or delete it and the
+link dangles.
+
+## Catalog
+
+| Extension | What it does | Adds |
+|---|---|---|
+| `btw` | One-off "by the way" side question with full conversation context but zero effect on the main session (ports Claude Code's `/btw`). | `/btw <question>` |
+| `goal` | Autonomous goal loop (Ralph loop, ports Codex CLI's `/goal`) — pins a durable objective and re-injects continuation prompts each turn until done/blocked. | `/goal <objective>` (`pause`/`resume`/`clear`/`status`, `--budget N`, `--no-block`) |
+| `question` | Interactive `questionnaire` tool — single question shows an option list, multiple shows tab-bar navigation with multi-select. | `questionnaire` tool |
+| `session-lock` | Advisory exclusive session lock so a TUI session and the pi-web backend share one writer; non-owners drop to read-only. | `/takeover` |
+| `subagents` | Background async multi-subagent runner — spawns concurrent child `pi` processes, persists transcripts, injects only final outputs back. | `spawn_subagents`/`list_subagents`/`fetch_subagent_result`/`send_to_subagent` tools, `ctrl+\` viewer |
+| `telegram` | Telegram push notifications on long-task completion, goal status changes, and when user input is requested. | — |
+| `ui-cosmetics` | Footer customization (token counts, auto-compaction marker, stats/model/branch lines) plus a live "Working… 3s" timer and per-turn model+duration meta. | — |
+
+## Config / env
+
+Most extensions are self-contained and read nothing. The exceptions:
+
+- `telegram` → `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, optional
+  `TELEGRAM_MIN_SECONDS` (default 30), from env or a `.env` next to the
+  resolved binary. No-ops if unconfigured.
+- `session-lock` → `PI_AGENT_DIR` (else `~/.pi/agent`) to locate the `locks/`
+  dir.
+- `subagents` → `PI_AGENT_DIR`; isolates child sessions under
+  `<agentDir>/.subagent-sessions`; discovers agent presets from
+  `~/.pi/agent/agents/*.md`, `.pi/agents/*.md`, and its own bundled `agents/*.md`.
+- `ui-cosmetics` → reads `compaction` settings from `~/.pi/agent/settings.json`
+  and `<cwd>/.pi/settings.json`.
 
 ## Layout
 
@@ -13,45 +41,20 @@ Two shapes are supported per extension:
 
 ```
 extensions/
-├── <name>.ts            # single file → installed to ~/.pi/agent/extensions/<name>.ts
-└── <name>/              # directory   → installed to ~/.pi/agent/extensions/<name>/
-    ├── index.ts         #              entry point
-    ├── package.json     #              optional, for npm deps
+├── <name>.ts        # single file → ~/.pi/agent/extensions/<name>.ts
+└── <name>/          # directory   → ~/.pi/agent/extensions/<name>/
+    ├── index.ts     #              entry point
+    ├── package.json #              optional, for npm deps
     └── ...
 ```
 
-## Workflow
+A single-file extension can `import` from `@earendil-works/pi-coding-agent`,
+`@earendil-works/pi-ai`, `@earendil-works/pi-tui`, and `typebox` without a
+`package.json`. Anything else needs the directory style with its own
+`node_modules/` (exposed as-is through the symlink). A self-contained extension
+keeps everything it imports inside its own directory — e.g. `session-lock` keeps
+its lock protocol at `session-lock/shared/session-lock.ts`, and `subagents`
+keeps its preset discovery in `subagents/agents.ts` plus `subagents/agents/`.
 
-1. Create the extension at `extensions/<name>.ts` or `extensions/<name>/`.
-2. Append `<name>` to `ALL_EXTENSIONS` in the `Makefile`.
-3. `make install`.
-4. `/reload` inside pi to pick it up.
-
-## Per-machine toggles
-
-`skills.local.json` (next to the Makefile, gitignored) holds the
-enable/disable map split by category. Set an extension to `false` to skip
-it on the next install:
-
-```json
-{
-  "skills":     { "ast-grep": true },
-  "extensions": { "my-extension": false }
-}
-```
-
-Disabled extensions are removed from `~/.pi/agent/extensions/` on the next
-`make install`. New extensions added to `ALL_EXTENSIONS` are appended to
-the `extensions` section as `true` automatically. See the top-level
-[`README.md`](../README.md#toggling-things-per-machine) for the full
-behavior contract.
-
-## Notes
-
-- Anything other than the entry script (e.g. `node_modules/`,
-  `package-lock.json`) lives inside the extension's directory and is
-  copied along with it.
-- Single-file extensions can `import` from `@earendil-works/pi-coding-agent`,
-  `typebox`, `@earendil-works/pi-ai`, and `@earendil-works/pi-tui` without a
-  `package.json`. Anything else needs the directory style with `npm install`.
-- See `~/.pi/agent/extensions/` after `make install` to confirm the install.
+See [`AGENTS.md`](AGENTS.md) for the authoring contract (hooks, self-containment
+rule, how to add one).
