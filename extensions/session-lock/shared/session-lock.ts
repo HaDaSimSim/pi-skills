@@ -130,7 +130,8 @@ export class SessionLock {
    */
   tryAcquire(): { acquired: boolean; current?: LockRecord } {
     const rec = this.read();
-    if (rec && !(this.myToken && rec.token === this.myToken)) {
+    // 죽은(orphan) 락—크래시한 프로세스가 남긴 건 자동 재획득 (force 불필요).
+    if (rec && !(this.myToken && rec.token === this.myToken) && !isStaleRecord(rec)) {
       return { acquired: false, current: rec };
     }
     this.myToken = newToken();
@@ -199,13 +200,46 @@ export class SessionLock {
 }
 
 /** 모든 락을 조망한다 (pi-web 대시보드의 "누가 뭘 점유 중" 표시용). */
+// PID 가 아직 살아있는지 (같은 호스트 기준). 판정 불가면 살아있다고 본다(안전).
+function pidAlive(pid: number): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0); // 시그널 0 = 존재 여부만 확인
+    return true;
+  } catch (e: unknown) {
+    return (e as { code?: string })?.code === "EPERM"; // EPERM=살아있음, ESRCH=없음
+  }
+}
+
+/** 죽은(orphan) 락인지 — 같은 호스트인데 점유 PID 가 이미 죽은 경우. */
+export function isStaleRecord(rec: LockRecord): boolean {
+  let host = "";
+  try {
+    host = hostname();
+  } catch {
+    /* ignore */
+  }
+  if (rec.host && host && rec.host !== host) return false; // 다른 머신 → 판정 불가
+  return !pidAlive(rec.pid);
+}
+
 export function listLocks(lockDir: string = defaultLockDir()): LockRecord[] {
   if (!existsSync(lockDir)) return [];
   const out: LockRecord[] = [];
   for (const f of readdirSync(lockDir)) {
     if (!f.endsWith(".json")) continue;
     try {
-      out.push(JSON.parse(readFileSync(join(lockDir, f), "utf8")) as LockRecord);
+      const rec = JSON.parse(readFileSync(join(lockDir, f), "utf8")) as LockRecord;
+      if (isStaleRecord(rec)) {
+        // 죽은 orphan 락 파일은 조용히 정리 (크래시한 백엔드가 남긴 가짜 "라이브" 방지).
+        try {
+          rmSync(join(lockDir, f), { force: true });
+        } catch {
+          /* ignore */
+        }
+        continue;
+      }
+      out.push(rec);
     } catch {
       /* 손상된 락은 건너뜀 */
     }
