@@ -687,7 +687,7 @@ export default function (pi: ExtensionAPI) {
       if (!ctx.hasUI) return;
       const list = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt);
       if (list.length === 0) {
-        ctx.ui.notify("이 세션에는 subagent run 이 없습니다.", "info");
+        ctx.ui.notify("No subagent runs in this session.", "info");
         return;
       }
       await ctx.ui.custom<void>(

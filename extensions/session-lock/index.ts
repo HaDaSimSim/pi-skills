@@ -46,16 +46,16 @@ export default function (pi: ExtensionAPI) {
     const force = ctx.hasUI
       ? await ctx.ui.confirm(
           "Session locked",
-          `이 세션은 이미 ${fmtOwner(current)} 가 점유 중입니다.\n` +
-            `강제로 가져오시겠습니까? (상대는 읽기전용으로 강등됩니다)`,
+          `This session is already held by ${fmtOwner(current)}.\n` +
+            `Force takeover? (the other side will be downgraded to read-only)`,
         )
       : false;
     if (force) {
       lock.takeover();
       setLockStatus(ctx, "🔓 owned (forced)");
-      ctx.ui.notify("락을 강제로 가져왔습니다.", "warning");
+      ctx.ui.notify("Forced takeover of the lock.", "warning");
     } else {
-      ctx.ui.notify("읽기전용 모드입니다. 메시지를 보낼 수 없습니다.", "warning");
+      ctx.ui.notify("Read-only mode. You cannot send messages.", "warning");
     }
   });
 
@@ -69,12 +69,12 @@ export default function (pi: ExtensionAPI) {
     if (st.state === "lost" && st.record) {
       setLockStatus(ctx, "🔒 lost (taken over)");
       ctx.ui.notify(
-        `이 세션을 ${fmtOwner(st.record)} 가 가져갔습니다. 읽기전용으로 전환됩니다.`,
+        `This session was taken over by ${fmtOwner(st.record)}. Switching to read-only.`,
         "error",
       );
     } else {
       setLockStatus(ctx, "🔒 read-only");
-      ctx.ui.notify("락이 없어 메시지를 보낼 수 없습니다.", "warning");
+      ctx.ui.notify("No lock held; cannot send messages.", "warning");
     }
     return { cancel: true }; // 에이전트 시작 차단 → 이 세션 파일에 쓰지 않음
   });
@@ -83,13 +83,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (_event, _ctx) => {
     if (!lock) return;
     if (!lock.isMine()) {
-      return { block: true, reason: "세션 락이 없습니다 (다른 곳에서 점유 중)." };
+      return { block: true, reason: "No session lock held (held elsewhere)." };
     }
   });
 
   // /takeover 수동 명령
   pi.registerCommand("takeover", {
-    description: "이 세션 락을 강제로 가져온다 (상대를 읽기전용으로 강등)",
+    description: "Force-take this session lock (downgrade the other side to read-only)",
     handler: async (_args, ctx) => {
       const path = ctx.sessionManager.getSessionFile();
       if (!path) return;
@@ -97,7 +97,7 @@ export default function (pi: ExtensionAPI) {
       const { takenFrom } = lock.takeover();
       setLockStatus(ctx, "🔓 owned (forced)");
       ctx.ui.notify(
-        takenFrom ? `${fmtOwner(takenFrom)} 로부터 락을 가져왔습니다.` : "락을 확보했습니다.",
+        takenFrom ? `Took the lock from ${fmtOwner(takenFrom)}.` : "Acquired the lock.",
         "info",
       );
     },

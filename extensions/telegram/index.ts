@@ -104,18 +104,18 @@ export default function (pi: ExtensionAPI) {
     const secs = Math.round(elapsed % 60);
     const dur = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
     const session = currentSessionName ? `\n📌 ${currentSessionName}` : "";
-    sendTelegram(config, `✅ *작업 완료* (${dur})\n📁 ${project}${session}\n🤖 ${model}`);
+    sendTelegram(config, `✅ *Task complete* (${dur})\n📁 ${project}${session}\n🤖 ${model}`);
   });
 
   // goal 연동: goal extension이 이벤트를 emit하면 받아서 알림
   pi.events.on("goal:status-change", (data) => {
     const { status, objective, note } = data as { status: string; objective: string; note?: string };
     if (status === "achieved") {
-      sendTelegram(config, `✅ *목표 달성*\n🎯 ${objective}\n📝 ${note || ""}`);
+      sendTelegram(config, `✅ *Goal achieved*\n🎯 ${objective}\n📝 ${note || ""}`);
     } else if (status === "blocked") {
-      sendTelegram(config, `🚧 *목표 차단*\n🎯 ${objective}\n❓ ${note || ""}`);
+      sendTelegram(config, `🚧 *Goal blocked*\n🎯 ${objective}\n❓ ${note || ""}`);
     } else if (status === "budget-limited") {
-      sendTelegram(config, `⛔ *예산 초과*\n🎯 ${objective}\n📝 ${note || ""}`);
+      sendTelegram(config, `⛔ *Budget exceeded*\n🎯 ${objective}\n📝 ${note || ""}`);
     }
   });
 
@@ -123,8 +123,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", (event) => {
     if (event.name === "questionnaire" || event.name === "question") {
       const args = event.input as { questions?: { prompt?: string }[] };
-      const firstQ = args?.questions?.[0]?.prompt || "질문이 있습니다";
-      sendTelegram(config, `❓ *입력 대기 중*\n${firstQ}`);
+      const firstQ = args?.questions?.[0]?.prompt || "There is a question";
+      sendTelegram(config, `❓ *Waiting for input*\n${firstQ}`);
     }
   });
 }
