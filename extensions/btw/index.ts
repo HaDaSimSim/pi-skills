@@ -61,6 +61,12 @@ function forkContextMessages(ctx: ExtensionCommandContext): Message[] {
 
 async function showAnswer(question: string, answer: string, ctx: ExtensionCommandContext): Promise<void> {
   if (!ctx.hasUI) return;
+  // pi-gui/pi-web: 터미널 오버레이 대신 호스트 어댑터로 마크다운 답변을 보여준다.
+  const webUi = ctx.ui as unknown as { showBtw?: (q: string, a: string) => Promise<void> };
+  if (process.env.PI_WEB_HOST && typeof webUi.showBtw === "function") {
+    await webUi.showBtw(question, answer);
+    return;
+  }
   await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
     const container = new Container();
     const border = new DynamicBorder((s: string) => theme.fg("accent", s));
@@ -114,8 +120,37 @@ export default function (pi: ExtensionAPI) {
       };
       const forkedMessages: Message[] = [...contextMessages, sideQuestion];
 
+      // 단발 LLM 호출 헬퍼 (도구 없는 단발 응답).
+      const runComplete = async (signal?: AbortSignal): Promise<string | null> => {
+        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
+        if (!auth.ok) throw new Error(auth.error);
+        if (!auth.apiKey) throw new Error(`No API key for ${ctx.model!.provider}`);
+        const response = await complete(
+          ctx.model!,
+          { messages: forkedMessages },
+          { apiKey: auth.apiKey, headers: auth.headers, signal, reasoning: "off" },
+        );
+        if (response.stopReason === "aborted") return null;
+        return response.content
+          .filter((c): c is { type: "text"; text: string } => c.type === "text")
+          .map((c) => c.text)
+          .join("\n")
+          .trim();
+      };
+
+      // pi-gui/pi-web: 터미널 로더(custom)를 못 그린다. 직접 호출하고 토스트로 진행 표시.
+      let answer: string | null;
+      if (process.env.PI_WEB_HOST) {
+        ctx.ui.notify(`Asking ${ctx.model.id} (side question)…`, "info");
+        try {
+          answer = await runComplete();
+        } catch (e) {
+          ctx.ui.notify(`/btw failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+          return;
+        }
+      } else {
       // 진행 표시 + 단발 호출. Esc 로 취소.
-      const answer = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+      answer = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
         const loader = new BorderedLoader(tui, theme, `Asking ${ctx.model!.id} (side question)...`);
         loader.onAbort = () => done(null);
 
@@ -154,6 +189,7 @@ export default function (pi: ExtensionAPI) {
 
         return loader;
       });
+      }
 
       if (answer === null) {
         ctx.ui.notify("Cancelled", "info");
