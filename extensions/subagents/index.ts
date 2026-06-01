@@ -149,6 +149,12 @@ function shortenPath(p: string): string {
 
 // 자식 pi 를 어떻게 실행할지 결정 (예제의 getPiInvocation 과 동일 로직).
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  // pi-gui/pi-web 호스트에서는 process.argv[1] 이 pi CLI 가 아니라 백엔드
+  // 진입점(server/index.ts)이다. 그걸 그대로 실행하면 자식이 또 백엔드를
+  // 띄우려다 포트(4317) 충돌(EADDRINUSE)로 죽는다. 이 호스트에서는 실제 pi 를 쓴다.
+  if (process.env.PI_WEB_HOST) {
+    return { command: "pi", args };
+  }
   const currentScript = process.argv[1];
   const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
   if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
@@ -263,7 +269,12 @@ export function runSubagentTurn(
         stdio: ["ignore", "pipe", "pipe"],
         // 자식 subagent 프로세스임을 마킹. 자식 pi 안에서도 로드되는 다른 익스텐션
         // (예: telegram)이 자식의 agent_end 에 반응해 이중 알림을 보내는 걸 막는다.
-        env: { ...process.env, PI_SUBAGENT: "1" },
+        // PI_WEB_HOST 는 제거: 자식은 진짜 pi CLI 이지 pi-gui 호스트가 아니다.
+        env: (() => {
+          const e = { ...process.env, PI_SUBAGENT: "1" };
+          delete e.PI_WEB_HOST;
+          return e;
+        })(),
       });
     } catch (e) {
       run.status = "failed";

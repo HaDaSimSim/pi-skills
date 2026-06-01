@@ -103,6 +103,36 @@ export default function questionnaire(pi: ExtensionAPI) {
 				multiSelect: q.multiSelect === true,
 			}));
 
+			// pi-gui/pi-web 같은 비-TUI 호스트: ctx.ui.custom(터미널 오버레이)을 못 그린다.
+			// 대신 일반 ctx.ui 브릿지(select/input)로 질문을 하나씩 물어 답을 모은다.
+			// (옵션 있으면 select, 없으면 input. multiSelect 는 단일 선택으로 강등.)
+			if (process.env.PI_WEB_HOST) {
+				const answers: Answer[] = [];
+				for (const q of questions) {
+					if (q.options.length > 0) {
+						const labels = q.options.map((o) => o.label);
+						const picked = await ctx.ui.select(q.prompt, labels);
+						if (picked === undefined) {
+							return { content: [{ type: "text", text: "User cancelled the questionnaire" }], details: { questions, answers, cancelled: true } };
+						}
+						const idx = labels.indexOf(picked);
+						const opt = q.options[idx] ?? q.options[0];
+						answers.push({ id: q.id, value: opt.value, label: opt.label, wasCustom: false, index: idx, values: [opt.value], labels: [opt.label] });
+					} else {
+						const typed = await ctx.ui.input(q.prompt);
+						if (typed === undefined) {
+							return { content: [{ type: "text", text: "User cancelled the questionnaire" }], details: { questions, answers, cancelled: true } };
+						}
+						answers.push({ id: q.id, value: typed, label: typed, wasCustom: true });
+					}
+				}
+				const lines = answers.map((a) => {
+					const qLabel = questions.find((x) => x.id === a.id)?.label || a.id;
+					return a.wasCustom ? `${qLabel}: user wrote: ${a.label}` : `${qLabel}: user selected: ${a.label}`;
+				});
+				return { content: [{ type: "text", text: lines.join("\n") }], details: { questions, answers, cancelled: false } };
+			}
+
 			const isMulti = questions.length > 1;
 			const totalTabs = questions.length + 1; // questions + Submit
 
