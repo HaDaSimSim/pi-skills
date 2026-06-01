@@ -76,6 +76,11 @@ function errorResult(
 }
 
 export default function questionnaire(pi: ExtensionAPI) {
+	// 자식 subagent 프로세스(`pi -p`, 비대화형)에서는 questionnaire 를 등록하지 않는다.
+	// 응답할 사람이 없어 해당 툴은 쓸모가 없고(hasUI=false 라 즉시 에러), 모델이 그걸 부르려다
+	// 턴을 낭비하거나 헷갈릴 수 있다. subagents 익스텐션이 자식 env 에 PI_SUBAGENT=1 을 박는다.
+	if (process.env.PI_SUBAGENT) return;
+
 	pi.registerTool({
 		name: "questionnaire",
 		label: "Questionnaire",
@@ -101,7 +106,15 @@ export default function questionnaire(pi: ExtensionAPI) {
 			const isMulti = questions.length > 1;
 			const totalTabs = questions.length + 1; // questions + Submit
 
-			const result = await ctx.ui.custom<QuestionnaireResult>((tui, theme, _kb, done) => {
+			// 원격 응답(텔레그램 등) 지원: askId 로 식별하고, pi.events 로 주고받는다.
+			// 로컬 TUI 입력과 원격 입력 중 먼저 온 쪽이 done 을 호출해 이긴다(중복 방지).
+			const askId = `ask_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+			let settled = false;
+			let finishRemote: (() => void) | undefined; // resolved 신호 + 구독 해제
+			let capturedDone: ((r: QuestionnaireResult) => void) | undefined;
+
+			const resultPromise = ctx.ui.custom<QuestionnaireResult>((tui, theme, _kb, done) => {
+				capturedDone = done;
 				// State
 				let currentTab = 0;
 				let optionIndex = 0;
@@ -131,6 +144,8 @@ export default function questionnaire(pi: ExtensionAPI) {
 				}
 
 				function submit(cancelled: boolean) {
+					if (settled) return;
+					settled = true;
 					done({ questions, answers: Array.from(answers.values()), cancelled });
 				}
 
@@ -395,14 +410,54 @@ export default function questionnaire(pi: ExtensionAPI) {
 					return lines;
 				}
 
+				// Focusable 구현: TUI 가 이 오버레이 컴포넌트에 setFocus 할 때 focused 를
+				// 내부 Editor 로 전파해야 한다. 그래야 Editor 가 CURSOR_MARKER 를 내보내고
+				// TUI 가 하드웨어 커서를 거기에 둬서 한국어 IME 조합창이 올바른 위치에 뜬다.
+				// (전파를 안 하면 editor.focused 가 계속 false → 마커 없음 → IME 위치가 어긋남.)
+				let _focused = false;
 				return {
 					render,
 					invalidate: () => {
 						cachedLines = undefined;
 					},
 					handleInput,
+					get focused() {
+						return _focused;
+					},
+					set focused(value: boolean) {
+						_focused = value;
+						editor.focused = value;
+					},
 				};
 			});
+
+			// ── 원격 응답 배선: question:ask emit, question:answer 구독 ───────────────
+			// telegram 같은 익스텐션이 question:ask 를 받아 원격 입력을 받고,
+			// question:answer 로 답을 돌려주면 그걸로 done 을 호출해 오버레이를 닫는다.
+			const applyRemoteAnswer = (data: unknown) => {
+				if (settled) return;
+				const payload = data as { askId?: string; answers?: Answer[]; cancelled?: boolean };
+				if (!payload || payload.askId !== askId) return;
+				settled = true;
+				const remoteAnswers = Array.isArray(payload.answers) ? payload.answers : [];
+				// capturedDone 은 factory 에서 동기적으로 설정되었다. 이걸 부르면
+				// 오버레이가 닫히고 resultPromise 가 풀린다.
+				capturedDone?.({ questions, answers: remoteAnswers, cancelled: payload.cancelled === true });
+			};
+			const unsubscribe = pi.events.on("question:answer", applyRemoteAnswer);
+			finishRemote = () => {
+				unsubscribe();
+				pi.events.emit("question:resolved", { askId });
+			};
+			// 질문 전체를 원격쪽에 알린다 (telegram 이 받아 버튼/문답으로 전송).
+			pi.events.emit("question:ask", { askId, questions });
+
+			let result: QuestionnaireResult;
+			try {
+				result = await resultPromise;
+			} finally {
+				finishRemote?.();
+			}
 
 			if (result.cancelled) {
 				return {
