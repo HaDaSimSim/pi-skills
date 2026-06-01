@@ -104,9 +104,27 @@ export default function questionnaire(pi: ExtensionAPI) {
 			}));
 
 			// pi-gui/pi-web 같은 비-TUI 호스트: ctx.ui.custom(터미널 오버레이)을 못 그린다.
-			// 대신 일반 ctx.ui 브릿지(select/input)로 질문을 하나씩 물어 답을 모은다.
-			// (옵션 있으면 select, 없으면 input. multiSelect 는 단일 선택으로 강등.)
+			// 호스트가 questionnaire 전용 어댑터(ctx.ui.questionnaire)를 제공하면 그걸로
+			// 구조화된 질문을 통째로 넘겨 예쁜 다이얼로그(탭/옵션/multiSelect/자유입력)로 받는다.
+			// 없으면 일반 select/input 브릿지로 하나씩 묻는 폴백.
+			const webUi = ctx.ui as unknown as {
+				questionnaire?: (qs: Question[]) => Promise<Answer[] | null>;
+			};
 			if (process.env.PI_WEB_HOST) {
+				if (typeof webUi.questionnaire === "function") {
+					const remote = await webUi.questionnaire(questions);
+					if (!remote) {
+						return { content: [{ type: "text", text: "User cancelled the questionnaire" }], details: { questions, answers: [], cancelled: true } };
+					}
+					const lines = remote.map((a) => {
+						const qLabel = questions.find((x) => x.id === a.id)?.label || a.id;
+						if (a.wasCustom) return `${qLabel}: user wrote: ${a.label}`;
+						if (a.values && a.values.length > 0) return `${qLabel}: user selected: ${a.labels?.join(", ") || a.label}`;
+						return `${qLabel}: user selected: ${a.label}`;
+					});
+					return { content: [{ type: "text", text: lines.join("\n") }], details: { questions, answers: remote, cancelled: false } };
+				}
+				// 폴백: select/input 으로 하나씩.
 				const answers: Answer[] = [];
 				for (const q of questions) {
 					if (q.options.length > 0) {
