@@ -104,27 +104,60 @@ export default function questionnaire(pi: ExtensionAPI) {
 			}));
 
 			// pi-gui/pi-web 같은 비-TUI 호스트: ctx.ui.custom(터미널 오버레이)을 못 그린다.
-			// 호스트가 questionnaire 전용 어댑터(ctx.ui.questionnaire)를 제공하면 그걸로
-			// 구조화된 질문을 통째로 넘겨 예쁜 다이얼로그(탭/옵션/multiSelect/자유입력)로 받는다.
-			// 없으면 일반 select/input 브릿지로 하나씩 묻는 폴백.
+			// 호스트가 questionnaire 어댑터(ctx.ui.questionnaire)를 제공하면 그걸로 예쁜
+			// 다이얼로그를 띄우되, telegram 같은 원격 응답과도 레이스한다(먼저 온 쪽 승).
 			const webUi = ctx.ui as unknown as {
-				questionnaire?: (qs: Question[]) => Promise<Answer[] | null>;
+				questionnaire?: (qs: Question[]) => { promise: Promise<Answer[] | null>; cancel: () => void };
 			};
-			if (process.env.PI_WEB_HOST) {
-				if (typeof webUi.questionnaire === "function") {
-					const remote = await webUi.questionnaire(questions);
-					if (!remote) {
-						return { content: [{ type: "text", text: "User cancelled the questionnaire" }], details: { questions, answers: [], cancelled: true } };
+			if (process.env.PI_WEB_HOST && typeof webUi.questionnaire === "function") {
+				const askId2 = `ask_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+				const gui = webUi.questionnaire(questions);
+				let remoteAnswers: Answer[] | null | undefined;
+				let cancelledRemote = false;
+				let resolveRemote: (() => void) | undefined;
+				const remoteWait = new Promise<void>((r) => (resolveRemote = r));
+				const onRemote = (data: unknown) => {
+					const payload = data as { askId?: string; answers?: Answer[]; cancelled?: boolean };
+					if (!payload || payload.askId !== askId2) return;
+					remoteAnswers = Array.isArray(payload.answers) ? payload.answers : [];
+					cancelledRemote = payload.cancelled === true;
+					resolveRemote?.();
+				};
+				const unsub = pi.events.on("question:answer", onRemote);
+				// telegram 등 원격 클라이언트에 질문 전송.
+				pi.events.emit("question:ask", { askId: askId2, questions });
+
+				let answers: Answer[] | null;
+				try {
+					// GUI 응답 vs 원격 응답 레이스. 먼저 온 쪽이 이기고 진 쪽은 정리.
+					const winner = await Promise.race([
+						gui.promise.then((a) => ({ src: "gui" as const, a })),
+						remoteWait.then(() => ({ src: "remote" as const, a: undefined })),
+					]);
+					if (winner.src === "remote") {
+						gui.cancel(); // GUI 다이얼로그 닫기
+						answers = cancelledRemote ? null : (remoteAnswers ?? []);
+					} else {
+						answers = winner.a; // GUI 결과 (null=취소)
 					}
-					const lines = remote.map((a) => {
-						const qLabel = questions.find((x) => x.id === a.id)?.label || a.id;
-						if (a.wasCustom) return `${qLabel}: user wrote: ${a.label}`;
-						if (a.values && a.values.length > 0) return `${qLabel}: user selected: ${a.labels?.join(", ") || a.label}`;
-						return `${qLabel}: user selected: ${a.label}`;
-					});
-					return { content: [{ type: "text", text: lines.join("\n") }], details: { questions, answers: remote, cancelled: false } };
+				} finally {
+					unsub();
+					pi.events.emit("question:resolved", { askId: askId2 });
 				}
-				// 폴백: select/input 으로 하나씩.
+
+				if (!answers) {
+					return { content: [{ type: "text", text: "User cancelled the questionnaire" }], details: { questions, answers: [], cancelled: true } };
+				}
+				const lines = answers.map((a) => {
+					const qLabel = questions.find((x) => x.id === a.id)?.label || a.id;
+					if (a.wasCustom) return `${qLabel}: user wrote: ${a.label}`;
+					if (a.values && a.values.length > 0) return `${qLabel}: user selected: ${a.labels?.join(", ") || a.label}`;
+					return `${qLabel}: user selected: ${a.label}`;
+				});
+				return { content: [{ type: "text", text: lines.join("\n") }], details: { questions, answers, cancelled: false } };
+			}
+			if (process.env.PI_WEB_HOST) {
+				// 어댑터 없는 비-TUI 호스트: select/input 으로 하나씩 (폴백).
 				const answers: Answer[] = [];
 				for (const q of questions) {
 					if (q.options.length > 0) {
