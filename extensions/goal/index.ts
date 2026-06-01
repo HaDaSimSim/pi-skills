@@ -39,6 +39,12 @@ interface GoalState {
 const STATE_ENTRY_TYPE = "goal-state";
 
 export default function (pi: ExtensionAPI) {
+  // 자식 subagent 프로세스(`pi -p`, 비대화형)에서는 goal 을 등록하지 않는다.
+  // /goal 은 사람이 걸는 자율 루프(Ralph loop)라 단발 -p 자식엔 불필요하고,
+  // continuation 재투입·goal 툴이 자식에 엮히면 멈추지 않을 위험도 있다.
+  // subagents 익스텐션이 자식 env 에 PI_SUBAGENT=1 을 박는다.
+  if (process.env.PI_SUBAGENT) return;
+
   let goal: GoalState | null = null;
 
   // ── 상태 표시 / 영속화 ────────────────────────────────────────────────
