@@ -27,6 +27,7 @@ import { type AgentToolResult, type ExtensionAPI, type ExtensionContext, type Th
 import { type Focusable, type TUI, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentScope, discoverAgents, formatAgentList } from "./agents.ts";
+import { isTransientError } from "./transient.ts";
 
 // ─── 상수 ────────────────────────────────────────────────────────────────
 
@@ -214,7 +215,6 @@ export function finalOutputFrom(transcript: TranscriptItem[]): string {
 }
 
 // ─── 자식 spawn + 스트리밍 ─────────────────────────────────────────────────
-
 // 자식 pi 를 띄워 한 turn 을 실행하고 JSON 이벤트를 파싱해 run/turn 을 갱신한다.
 //
 // 세션은 격리 디렉터리(run.sessionDir)에 run.sessionId 로 저장된다.
@@ -462,11 +462,35 @@ export default function (pi: ExtensionAPI) {
         promptFile = tmp.filePath;
         tmpDir = tmp.dir;
       }
-      await runSubagentTurn(run, prompt, promptFile, ctx.cwd, controller.signal, () => {
-        persistRun(run);
-        updateWidget(ctx);
-        renderViewer?.();
-      });
+      // transient retry: 자식이 일시적 실패(rate limit/네트워크 깜빡)로 끝나면 같은
+      // 모델로 짧은 backoff 후 재시도한다. 모델 정체성은 유지(fallback 아님).
+      // abort 나 비-일시적 오류(잘못된 인자 등)는 재시도하지 않는다.
+      const MAX_RETRIES = 2;
+      for (let attempt = 0; ; attempt++) {
+        await runSubagentTurn(run, prompt, promptFile, ctx.cwd, controller.signal, () => {
+          persistRun(run);
+          updateWidget(ctx);
+          renderViewer?.();
+        });
+        if (
+          run.status === "failed" &&
+          !controller.signal.aborted &&
+          attempt < MAX_RETRIES &&
+          isTransientError(run.error)
+        ) {
+          const backoffMs = 1000 * (attempt + 1);
+          const prevErr = run.error ?? "";
+          // 실패한 turn 을 transcript 에서 제거(재시도가 새 turn 을 push 하므로 누적 방지).
+          run.turns.pop();
+          run.error = `transient failure (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${backoffMs}ms: ${prevErr}`.slice(0, 500);
+          persistRun(run);
+          updateWidget(ctx);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          if (controller.signal.aborted) break;
+          continue;
+        }
+        break;
+      }
     } finally {
       if (tmpDir) fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
       controllers.delete(run.runId);
@@ -540,8 +564,9 @@ export default function (pi: ExtensionAPI) {
       "Returns immediately — you are NOT blocked and should continue working.",
       "Each subagent runs in an isolated context and keeps its own session, so you can continue the conversation later.",
       "When a subagent finishes you receive a SHORT notification with its id — not the full output. This notification arrives on its own; do NOT sleep or poll waiting for it.",
+      "Transient failures (rate limit, timeout, 5xx, network blips) are retried automatically with the SAME model and backoff before a run is reported as failed — you don't need to re-spawn for those.",
       "Call fetch_subagent_result with that id to read the response, send_to_subagent to ask follow-ups (queued if it is still running), and abort_subagent to stop one early.",
-      "Use list_subagents to see all runs and which have unread responses.",
+      "Use list_subagents to see all runs and which have unread responses (only when you actively need the overview — NOT as a way to wait for a run to finish).",
       "Each task may name an `agent` (a discovered preset with its own system prompt, tools, and default model),",
       "and/or set a `model` override. Omit `agent` to run a bare subagent with full tool access controlled only by `model`.",
       'Set `model` to "current" to reuse the parent\'s current model. `title` is a required short label for the run list.',
@@ -552,6 +577,7 @@ export default function (pi: ExtensionAPI) {
       "Use spawn_subagents to delegate independent tasks that can run in parallel without blocking you.",
       "Pick a specialized agent when one fits; otherwise omit agent and just set a model (use 'current' to match yourself).",
       "After spawning, just keep working or end your turn normally. Do NOT poll, and never run sleep/wait to pass time — when a subagent finishes, pi delivers a '[subagent <id> finished]' message to you automatically, even if you stopped.",
+      "Waiting for a subagent? Do NOT repeatedly call list_subagents (or any tool) to check on it — that just burns tokens. If you have no other work, STOP and end your turn; the '[subagent <id> finished]' notification will wake you. Polling the run list in a loop is a bug, not progress.",
       "When you get a '[subagent <id> finished]' notification, call fetch_subagent_result with that id to read the output.",
       "To ask a subagent a follow-up, call send_to_subagent with its id (it works even while the subagent is still running — the message is queued). Use abort_subagent to stop one early.",
     ],
@@ -660,7 +686,8 @@ export default function (pi: ExtensionAPI) {
     label: "List Subagents",
     description:
       "List all subagent runs in this session with their id, title, status, turn count, and how many responses are unread. " +
-      "Use this to find a subagent's id before calling fetch_subagent_result or send_to_subagent.",
+      "Use this to find a subagent's id before calling fetch_subagent_result or send_to_subagent. " +
+      "Do NOT call this in a loop to wait for a run to complete — if you are only waiting, stop and end your turn; the '[subagent <id> finished]' notification arrives on its own.",
     promptSnippet: "List subagent runs and their unread status",
     parameters: Type.Object({}),
     async execute(): Promise<AgentToolResult<Record<string, unknown>>> {
