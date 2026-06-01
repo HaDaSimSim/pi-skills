@@ -45,7 +45,7 @@ BINS       := $(addprefix $(BIN_DIR)/,$(SKILLS))
 GOFLAGS := -trimpath
 LDFLAGS := -s -w
 
-.PHONY: all build install uninstall clean fmt vet test help status
+.PHONY: all build install uninstall clean fmt vet test help status check
 
 all: build
 
@@ -57,6 +57,7 @@ help:
 	@echo "              (disabled entries are removed from those dirs)"
 	@echo "  uninstall   remove skills and extensions (preserves .env, node_modules)"
 	@echo "  status      show enabled/disabled skills + extensions"
+	@echo "  check       type-check enabled extensions with tsc (no node_modules needed)"
 	@echo "  clean       remove $(BIN_DIR)/"
 	@echo "  fmt vet test"
 	@echo ""
@@ -78,6 +79,17 @@ status:
 	@echo "extensions install: $(EXTENSIONS_DIR)"
 
 build: $(BINS)
+
+# Type-check enabled extensions. Extensions are plain .ts run by pi via jiti,
+# so there is no node_modules/tsconfig here; the helper locates the global pi
+# install at runtime and points tsc's paths/typeRoots at the types it bundles.
+# Machine independent, no npm install, no committed node_modules.
+check:
+	@if [ -z "$(strip $(EXTENSIONS))" ]; then \
+	  echo "no enabled extensions to check"; \
+	else \
+	  scripts/check-extensions.py $(addprefix extensions/,$(EXTENSIONS)); \
+	fi
 
 # Rebuild a binary if any Go source under the project changes. Cheaper than
 # tracking per-skill deps and good enough for a tiny tree.
