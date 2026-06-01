@@ -121,8 +121,11 @@ export default function (pi: ExtensionAPI) {
 
         const ask = async (): Promise<string | null> => {
           const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
-          if (!auth.ok || !auth.apiKey) {
-            throw new Error(auth.ok ? `No API key for ${ctx.model!.provider}` : auth.error);
+          if (!auth.ok) {
+            throw new Error(auth.error);
+          }
+          if (!auth.apiKey) {
+            throw new Error(`No API key for ${ctx.model!.provider}`);
           }
 
           // complete() 는 도구 스키마를 전송하지 않는다 → 도구 없는 단발 응답.
