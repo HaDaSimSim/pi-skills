@@ -58,6 +58,14 @@ Two install mechanics drive almost everything:
   runs the full typecheck + `go vet`. Hooks call `./node_modules/.bin/*`
   directly (not `pnpm exec`) so a broken global pnpm config can't block them.
 
+## Code conventions
+
+- **Comments must be written in English only.** No Korean (or any other
+  non-English) comments anywhere in the codebase — `main.go`, `*.ts`, scripts,
+  config, all of it. Avoid non-English text in code, identifiers, and committed
+  strings as much as possible; keep everything in English unless a literal
+  value genuinely requires otherwise.
+
 ## Adding things
 
 - **A skill** → see [`skills/AGENTS.md`](skills/AGENTS.md). In short:
