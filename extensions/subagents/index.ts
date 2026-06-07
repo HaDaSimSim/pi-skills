@@ -497,7 +497,8 @@ export default function (pi: ExtensionAPI) {
           "dim",
           `🤖 ${running} subagent${running > 1 ? "s" : ""} running`,
         );
-        ctx.ui.setStatus("subagents", viewHint ? `${label} ${viewHint}` : label);
+        const divider = ctx.ui.theme.fg("dim", " • ");
+        ctx.ui.setStatus("subagents", viewHint ? `${label}${divider}${viewHint}` : label);
       } else if (all.length > 0) {
         ctx.ui.setStatus("subagents", viewHint);
       } else {
