@@ -249,7 +249,7 @@ export default function (pi: ExtensionAPI) {
             statusParts.push(...sorted);
           }
           if (statusParts.length > 0 || lastMeta) {
-            const leftPart = statusParts.join(" ");
+            const leftPart = statusParts.join(theme.fg("dim", " • "));
             // 모델이 바뀌었으면 모델명 포함, 같으면 시간만
             let metaText = "";
             if (lastMeta) {
