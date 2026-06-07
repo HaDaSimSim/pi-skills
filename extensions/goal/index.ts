@@ -47,6 +47,19 @@ export default function (pi: ExtensionAPI) {
 
   let goal: GoalState | null = null;
 
+  // ── subagents 연동 ────────────────────────────────────────────────────
+  // subagents 익스텐션이 "subagents:running" 으로 진행 중 개수를 브로드캐스트한다.
+  // 백그라운드 subagent 가 도는 동안에는 agent_end 에서 continuation 재투입을
+  // 보류한다(아래 agent_end 핸들러). 그러면 메인이 결과를 안 기다리고 계속
+  // 폭주하는 걸 막는다. 마지막 subagent 가 끝나면 subagents 가 보내는
+  // "[subagent ... finished]" 메시지가 새 턴을 만들고, 그 턴의 agent_end 에서
+  // (이제 running==0) 루프가 자연스럽게 재개된다. 따라서 여긴 카운터만 유지하면
+  // 되고, 별도 resume kick 은 두지 않는다(이중 투입 방지).
+  let runningSubagents = 0;
+  pi.events.on("subagents:running", (payload: { running?: number }) => {
+    runningSubagents = typeof payload?.running === "number" ? payload.running : 0;
+  });
+
   // ── 상태 표시 / 영속화 ────────────────────────────────────────────────
 
   const statusEmoji: Record<GoalStatus, string> = {
@@ -197,6 +210,18 @@ export default function (pi: ExtensionAPI) {
       });
       if (ctx.hasUI)
         ctx.ui.notify(`Goal stopped: token budget (${goal.tokenBudget}) reached.`, "warning");
+      return;
+    }
+
+    // 백그라운드 subagent 가 아직 돌고 있으면 continuation 을 보류한다.
+    // 그냥 return 만 해도 되는 이유: subagents 가 각 run 을 끝낼 때마다
+    // "[subagent ... finished]" 메시지를 sendUserMessage 로 넣어 새 턴을 만든다.
+    // 그 턴의 agent_end 때엔 runningSubagents 가 이미 감소해 있으므로, 마지막
+    // subagent 까지 끝나면(running→0) 루프가 자연스럽게 재개된다. 여러개면
+    // 마지막 하나곌지 매번 보류→재개 를 반복한다. (별도 resume kick 은 두지
+    // 않는다 — 그러면 finished 턴과 이중으로 continuation 이 투입된다.)
+    if (runningSubagents > 0) {
+      setStatus(ctx);
       return;
     }
 

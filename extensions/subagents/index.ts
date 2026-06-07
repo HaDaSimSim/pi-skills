@@ -476,9 +476,17 @@ export default function (pi: ExtensionAPI) {
 
   // 진행 표시 widget 갱신
   const updateWidget = (ctx: ExtensionContext) => {
-    if (!ctx.hasUI) return;
     const all = [...runs.values()];
     const running = all.filter((r) => r.status === "running").length;
+    // 다른 extension(특히 goal 루프)이 "백그라운드 subagent 가 도는 동안
+    // continuation 을 보류"할 수 있도록 진행 중 개수를 공유 버스에 흘린다.
+    // UI 유무와 무관하게 항상 emit 한다 (print 모드 자식엔 PI_SUBAGENT 가드로 미도달).
+    try {
+      pi.events.emit("subagents:running", { running });
+    } catch {
+      /* 버스 미초기화 단계: 무시 */
+    }
+    if (!ctx.hasUI) return;
     // run 이 하나라도 있으면 뷰어 단축키 hint 를 footer 에 노출한다.
     // rawKeyHint / ctx.ui.theme 는 TUI theme(initTheme) 에 의존한다. pi-web 같은
     // 비-TUI 호스트는 hasUI=true 여도 theme 가 없어 throw 하므로 전체를 방어한다.
