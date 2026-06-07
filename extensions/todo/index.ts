@@ -89,6 +89,14 @@ const MAX_WIDGET_ITEMS = 8;
 // todo_write call history.
 const REMIND_AFTER_TURNS = 3;
 
+// Cold-start nudge: if the model has never used todo_write/read this session and
+// this many turns have passed, inject a one-line suggestion to consider a todo
+// list for multi-step work. Mirrors Claude Code's todo_reminder, which fires even
+// when the list has never been created. Kept gentle and ignorable.
+const COLD_NUDGE_AFTER_TURNS = 6;
+// Minimum turns between successive cold-start nudges, so we don't nag every turn.
+const NUDGE_COOLDOWN_TURNS = 6;
+
 const MARK: Record<TodoStatus, string> = {
   pending: "[ ]",
   in_progress: "[~]",
@@ -106,6 +114,11 @@ export default function (pi: ExtensionAPI) {
   // call we record the "turn the list was last handled" to measure elapsed turns.
   let turnCount = 0;
   let lastWriteTurn = 0;
+  // Whether the model has ever called todo_write/read this session. Drives the
+  // cold-start nudge (only fires while still false).
+  let everUsedTodo = false;
+  // Turn of the last cold-start nudge, for the cooldown.
+  let lastColdNudgeTurn = 0;
 
   // List → widget line array. Show in_progress and pending first, and push completed
   // items to the back so the less important ones get truncated first.
@@ -226,6 +239,7 @@ export default function (pi: ExtensionAPI) {
       // Wholesale replace + clear if all completed (logic.normalize).
       todos = normalize(params.todos as TodoItem[]);
       lastWriteTurn = turnCount; // Just provided the list, so reset the reminder counter.
+      everUsedTodo = true; // Stop cold-start nudges once the tool is in use.
       persist();
       emitChange();
       refresh(ctx);
@@ -247,6 +261,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, _ctx) {
       lastWriteTurn = turnCount; // Read explicitly, so reset the reminder counter.
+      everUsedTodo = true; // Stop cold-start nudges once the tool is in use.
       if (todos.length === 0) {
         return { content: [{ type: "text", text: "The todo list is empty." }], details: { todos } };
       }
@@ -287,34 +302,69 @@ export default function (pi: ExtensionAPI) {
     todos = [];
     turnCount = 0;
     lastWriteTurn = 0;
+    everUsedTodo = false;
+    lastColdNudgeTurn = 0;
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type === "custom" && entry.customType === STATE_ENTRY_TYPE) {
         const data = entry.data as { todos?: TodoItem[] } | undefined;
         if (data && Array.isArray(data.todos)) todos = data.todos;
       }
     }
+    // A restored non-empty list means the tool was used in an earlier slice of
+    // this session; don't cold-start nudge in that case.
+    if (todos.length > 0) everUsedTodo = true;
     refresh(ctx);
   });
 
-  // If the model hasn't used todo_write/read for a while and there are unfinished
-  // items remaining, inject the current list as an ephemeral user message into this
-  // turn's context only. What's pushed to event.messages doesn't stay in the session
-  // journal and is recomputed on each call, so it doesn't accumulate in the context.
+  // Two ephemeral reminders, injected into this turn's context only. Pushed
+  // messages don't stay in the session journal and are recomputed each call, so
+  // they don't accumulate in the context.
+  //   1. Active-list reminder: the model has a non-empty list but hasn't touched
+  //      it for a while — re-inject it so it isn't forgotten after a tangent or
+  //      compaction.
+  //   2. Cold-start nudge: the model has never used the todo tools this session
+  //      — suggest a list for multi-step work (gentle, ignorable).
   pi.on("context", (event) => {
-    if (todos.length === 0 || allDone(todos)) return;
-    if (turnCount - lastWriteTurn < REMIND_AFTER_TURNS) return;
-    const lines = todos.map((t) => `${MARK[t.status]} ${labelOf(t)}`);
-    const reminder =
-      "[todo reminder] Your current task list (manage it with todo_write):\n" +
-      `${lines.join("\n")}\n` +
-      `${doneCount(todos)}/${todos.length} completed. Keep exactly one task in_progress; ` +
-      "update the list as you make progress.";
-    return {
-      messages: [
-        ...event.messages,
-        { role: "user" as const, content: reminder, timestamp: Date.now() },
-      ],
-    };
+    // Active-list reminder: re-inject the current list so the model doesn't lose
+    // track of its own todos after a long tangent or compaction.
+    if (todos.length > 0 && !allDone(todos)) {
+      if (turnCount - lastWriteTurn < REMIND_AFTER_TURNS) return;
+      const lines = todos.map((t) => `${MARK[t.status]} ${labelOf(t)}`);
+      const reminder =
+        "[todo reminder] Your current task list (manage it with todo_write):\n" +
+        `${lines.join("\n")}\n` +
+        `${doneCount(todos)}/${todos.length} completed. Keep exactly one task in_progress; ` +
+        "update the list as you make progress.";
+      return {
+        messages: [
+          ...event.messages,
+          { role: "user" as const, content: reminder, timestamp: Date.now() },
+        ],
+      };
+    }
+
+    // Cold-start nudge: the model has never used the todo tools this session and
+    // enough turns have passed. Suggest a list for multi-step work, but make it
+    // easy to ignore for trivial/conversational tasks.
+    if (
+      !everUsedTodo &&
+      todos.length === 0 &&
+      turnCount >= COLD_NUDGE_AFTER_TURNS &&
+      turnCount - lastColdNudgeTurn >= NUDGE_COOLDOWN_TURNS
+    ) {
+      lastColdNudgeTurn = turnCount;
+      const reminder =
+        "[todo reminder] You haven't started a todo list this session. If the work " +
+        "in flight is multi-step or non-trivial, consider todo_write to plan it and " +
+        "surface progress to the user. Skip this if the task is trivial or purely " +
+        "conversational — gentle reminder only, never mention it to the user.";
+      return {
+        messages: [
+          ...event.messages,
+          { role: "user" as const, content: reminder, timestamp: Date.now() },
+        ],
+      };
+    }
   });
 
   // When the agent starts working, turn on the detail widget and bump the reminder turn counter.
