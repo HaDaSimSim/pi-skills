@@ -37,3 +37,22 @@ install on a pre-migration file still honours `false` flips.
 stdout is reserved for sync messages / disabled output; all errors go to stderr.
 
 See [`AGENTS.md`](AGENTS.md) for invariants to preserve when editing.
+
+## check-extensions.py
+
+Type-checks the TypeScript extensions with `tsc --noEmit` without committing a
+`node_modules/` or `tsconfig.json`. Extensions are plain `.ts` files run by pi
+via jiti, so there is nothing locally for the compiler to resolve
+`@earendil-works/*` or the Node builtins against. This script locates the
+global pi install at runtime, writes a throwaway `tsconfig.json` pointing
+`paths`/`typeRoots` at pi's bundled types, and runs `tsc` over the named
+extension dirs.
+
+```bash
+# Type-check one or more extension dirs (all *.ts found under each).
+check-extensions.py EXT_DIR [EXT_DIR ...]
+```
+
+Exit code is tsc's (0 clean, non-zero on type errors). Requires `node`, `npm`,
+and `npx` on `PATH` — the same toolchain pi itself needs. Invoked by the
+lefthook pre-push hook and the root `pnpm run typecheck` script.

@@ -21,7 +21,8 @@ export function formatInt(n: number): string {
 
 // 비용. 큰 값은 콤마, 작은 값은 소수 더 보여줌.
 export function formatCost(n: number): string {
-  if (n >= 100) return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (n >= 100)
+    return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   if (n >= 1) return `$${n.toFixed(2)}`;
   if (n >= 0.01) return `$${n.toFixed(3)}`;
   return `$${n.toFixed(4)}`;
@@ -50,12 +51,16 @@ export interface KV {
 export function renderBox(theme: Theme, width: number, title: string, rows: KV[]): string[] {
   const inner = Math.max(10, width - 2); // │ 안쪽 폭
   const out: string[] = [];
-  const top = "┌" + "─".repeat(inner) + "┐";
-  const mid = "├" + "─".repeat(inner) + "┤";
-  const bot = "└" + "─".repeat(inner) + "┘";
+  const top = `┌${"─".repeat(inner)}┐`;
+  const mid = `├${"─".repeat(inner)}┤`;
+  const bot = `└${"─".repeat(inner)}┘`;
   out.push(theme.fg("dim", top));
   // 가운데 정렬 타이틀
-  out.push(theme.fg("dim", "│") + centerStyled(theme, title.toUpperCase(), inner, "accent", true) + theme.fg("dim", "│"));
+  out.push(
+    theme.fg("dim", "│") +
+      centerStyled(theme, title.toUpperCase(), inner, "accent", true) +
+      theme.fg("dim", "│"),
+  );
   out.push(theme.fg("dim", mid));
   for (const r of rows) {
     const labelCol = r.label;
@@ -90,11 +95,15 @@ export function renderBars(
 ): string[] {
   const inner = Math.max(20, width - 2);
   const out: string[] = [];
-  const top = "┌" + "─".repeat(inner) + "┐";
-  const mid = "├" + "─".repeat(inner) + "┤";
-  const bot = "└" + "─".repeat(inner) + "┘";
+  const top = `┌${"─".repeat(inner)}┐`;
+  const mid = `├${"─".repeat(inner)}┤`;
+  const bot = `└${"─".repeat(inner)}┘`;
   out.push(theme.fg("dim", top));
-  out.push(theme.fg("dim", "│") + centerStyled(theme, title.toUpperCase(), inner, "accent", true) + theme.fg("dim", "│"));
+  out.push(
+    theme.fg("dim", "│") +
+      centerStyled(theme, title.toUpperCase(), inner, "accent", true) +
+      theme.fg("dim", "│"),
+  );
   out.push(theme.fg("dim", mid));
 
   const total = rows.reduce((a, r) => a + r.count, 0) || 1;
@@ -125,7 +134,11 @@ export function renderBars(
     out.push(theme.fg("dim", "│") + clampStyled(line, inner) + theme.fg("dim", "│"));
   }
   if (shown.length === 0) {
-    out.push(theme.fg("dim", "│") + clampStyled(" " + theme.fg("dim", "(none)"), inner) + theme.fg("dim", "│"));
+    out.push(
+      theme.fg("dim", "│") +
+        clampStyled(` ${theme.fg("dim", "(none)")}`, inner) +
+        theme.fg("dim", "│"),
+    );
   }
   out.push(theme.fg("dim", bot));
   return out;
@@ -133,12 +146,21 @@ export function renderBars(
 
 // 시간대(24) 히트맵: 각 시간을 농도 블록 한 칸으로 표현. 아래에 0/6/12/18/23 눈금.
 // counts 는 [0..23] 메시지 수.
-export function renderHourHeatmap(theme: Theme, width: number, title: string, counts: number[]): string[] {
+export function renderHourHeatmap(
+  theme: Theme,
+  width: number,
+  title: string,
+  counts: number[],
+): string[] {
   const inner = Math.max(28, width - 2);
   const out: string[] = [];
-  out.push(theme.fg("dim", "┌" + "─".repeat(inner) + "┐"));
-  out.push(theme.fg("dim", "│") + centerStyled(theme, title.toUpperCase(), inner, "accent", true) + theme.fg("dim", "│"));
-  out.push(theme.fg("dim", "├" + "─".repeat(inner) + "┤"));
+  out.push(theme.fg("dim", `┌${"─".repeat(inner)}┐`));
+  out.push(
+    theme.fg("dim", "│") +
+      centerStyled(theme, title.toUpperCase(), inner, "accent", true) +
+      theme.fg("dim", "│"),
+  );
+  out.push(theme.fg("dim", `├${"─".repeat(inner)}┤`));
 
   const max = counts.reduce((a, b) => Math.max(a, b), 0) || 1;
   const blocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
@@ -150,18 +172,20 @@ export function renderHourHeatmap(theme: Theme, width: number, title: string, co
       return blocks[lvl];
     })
     .join("");
-  const bar = " " + theme.fg("accent", cells);
+  const bar = ` ${theme.fg("accent", cells)}`;
   out.push(theme.fg("dim", "│") + clampStyled(bar, inner) + theme.fg("dim", "│"));
 
   // 눈금 줄: 0 / 6 / 12 / 18 / 23 위치에 대략 맞춤.
   const ruler = buildHourRuler();
-  out.push(theme.fg("dim", "│") + clampStyled(" " + theme.fg("dim", ruler), inner) + theme.fg("dim", "│"));
+  out.push(
+    theme.fg("dim", "│") + clampStyled(` ${theme.fg("dim", ruler)}`, inner) + theme.fg("dim", "│"),
+  );
 
   // 피크 시간 요약.
   const peakLine = ` ${theme.fg("muted", "peak")} ${theme.fg("text", `${pad2(peakHour)}:00`)} ${theme.fg("dim", `(${formatInt(counts[peakHour] || 0)} msgs)`)}`;
   out.push(theme.fg("dim", "│") + clampStyled(peakLine, inner) + theme.fg("dim", "│"));
 
-  out.push(theme.fg("dim", "└" + "─".repeat(inner) + "┘"));
+  out.push(theme.fg("dim", `└${"─".repeat(inner)}┘`));
   return out;
 }
 
@@ -199,7 +223,7 @@ function pct(n: number, total: number): string {
 export function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   if (max <= 1) return s.slice(0, max);
-  return s.slice(0, max - 1) + "…";
+  return `${s.slice(0, max - 1)}…`;
 }
 
 function padRight(s: string, w: number): string {
@@ -227,7 +251,13 @@ function clampStyled(styled: string, inner: number): string {
   return styled + " ".repeat(inner - plainLen);
 }
 
-function centerStyled(theme: Theme, text: string, inner: number, color: string, bold: boolean): string {
+function centerStyled(
+  theme: Theme,
+  text: string,
+  inner: number,
+  color: string,
+  bold: boolean,
+): string {
   const t = truncate(text, inner);
   const len = [...t].length;
   const leftPad = Math.max(0, Math.floor((inner - len) / 2));
@@ -238,7 +268,7 @@ function centerStyled(theme: Theme, text: string, inner: number, color: string, 
 
 // ANSI 이스케이프를 뺀 가시 길이.
 function stripAnsiLen(s: string): number {
-  // eslint-disable-next-line no-control-regex
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR escape sequences requires the ESC control char
   const plain = s.replace(/\u001b\[[0-9;]*m/g, "");
   return [...plain].length;
 }

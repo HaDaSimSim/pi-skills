@@ -70,7 +70,7 @@ Env:
   RELAY_API_KEY        API key (sk-relay-...). PI_RELAY_API_KEY also accepted.
                        Falls back to a KEY=VALUE .env next to the binary.
   RELAY_SETUP_URL      Override config endpoint
-                       (default: ` + defaultSetupURL + `)
+                       (default: `+defaultSetupURL+`)
   PI_MODELS_PATH       Override models.json path
                        (default: ~/.pi/agent/models.json)`)
 }

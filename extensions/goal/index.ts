@@ -18,8 +18,8 @@
 //
 // 설치: ~/.pi/agent/extensions/goal/index.ts (make install 이 symlink)
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 type GoalStatus = "pursuing" | "paused" | "achieved" | "blocked" | "budget-limited";
@@ -148,7 +148,7 @@ export default function (pi: ExtensionAPI) {
   // agent_end 직후 idle 로 전환되는 타이밍을 안전하게 잡기 위해 한 틱 미룬다.
   const kick = (ctx: ExtensionContext, kind: "start" | "continue") => {
     setTimeout(() => {
-      if (!goal || goal.status !== "pursuing") return;
+      if (goal?.status !== "pursuing") return;
       const prompt = buildPrompt(goal, kind);
       if (ctx.isIdle()) {
         pi.sendUserMessage(prompt);
@@ -161,7 +161,7 @@ export default function (pi: ExtensionAPI) {
 
   // 매 프롬프트가 끝날 때마다: 목표 추적 중이면 다음 step 을 재투입.
   pi.on("agent_end", async (event, ctx) => {
-    if (!goal || goal.status !== "pursuing") return;
+    if (goal?.status !== "pursuing") return;
 
     // 사용자가 Esc 로 abort 했으면 루프를 멈춘다. abort 는 "그만" 신호이므로
     // 자동 재투입하지 않고 paused 로 전환해 사용자가 직접 resume 하게 둔다.
@@ -190,8 +190,13 @@ export default function (pi: ExtensionAPI) {
       goal.note = `token budget ${goal.tokenBudget} reached`;
       persist();
       setStatus(ctx);
-      pi.events.emit("goal:status-change", { status: "budget-limited", objective: goal.objective, note: goal.note });
-      if (ctx.hasUI) ctx.ui.notify(`Goal stopped: token budget (${goal.tokenBudget}) reached.`, "warning");
+      pi.events.emit("goal:status-change", {
+        status: "budget-limited",
+        objective: goal.objective,
+        note: goal.note,
+      });
+      if (ctx.hasUI)
+        ctx.ui.notify(`Goal stopped: token budget (${goal.tokenBudget}) reached.`, "warning");
       return;
     }
 
@@ -223,7 +228,11 @@ export default function (pi: ExtensionAPI) {
         goal.note = params.summary;
         persist();
         setStatus(ctx);
-        pi.events.emit("goal:status-change", { status: "achieved", objective: goal.objective, note: params.summary });
+        pi.events.emit("goal:status-change", {
+          status: "achieved",
+          objective: goal.objective,
+          note: params.summary,
+        });
         if (ctx.hasUI) ctx.ui.notify("✅ Goal achieved — ending the loop.", "info");
       }
       return {
@@ -267,7 +276,11 @@ export default function (pi: ExtensionAPI) {
         goal.note = params.reason;
         persist();
         setStatus(ctx);
-        pi.events.emit("goal:status-change", { status: "blocked", objective: goal.objective, note: params.reason });
+        pi.events.emit("goal:status-change", {
+          status: "blocked",
+          objective: goal.objective,
+          note: params.reason,
+        });
         if (ctx.hasUI) ctx.ui.notify("🚧 Goal blocked — stopping the loop.", "warning");
       }
       return {
@@ -281,7 +294,9 @@ export default function (pi: ExtensionAPI) {
   // ── /goal 명령 (수명주기 제어) ────────────────────────────────────────
 
   // 선행 플래그 파싱: --budget N | --budget=N, --no-block (goal_blocked 무시)
-  const parseObjective = (raw: string): { objective: string; tokenBudget?: number; ignoreBlocked: boolean } => {
+  const parseObjective = (
+    raw: string,
+  ): { objective: string; tokenBudget?: number; ignoreBlocked: boolean } => {
     let tokenBudget: number | undefined;
     let ignoreBlocked = false;
     const tokens = raw.trim().split(/\s+/);
@@ -291,7 +306,7 @@ export default function (pi: ExtensionAPI) {
       const eq = t.indexOf("=");
       const take = (key: string): string | undefined => {
         if (t === key) return tokens[++i];
-        if (t.startsWith(key + "=")) return t.slice(eq + 1);
+        if (t.startsWith(`${key}=`)) return t.slice(eq + 1);
         return undefined;
       };
       if (t === "--no-block" || t === "--ignore-blocked") {
@@ -331,7 +346,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const trimmed = args.trim();
       const [sub, ...subRest] = trimmed.split(/\s+/);
-      const subArg = subRest.join(" ").trim();
+      const _subArg = subRest.join(" ").trim();
 
       // 수명주기 서브커맨드
       if (trimmed === "" || sub === "status") {
@@ -339,7 +354,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (sub === "pause") {
-        if (!goal || goal.status !== "pursuing") {
+        if (goal?.status !== "pursuing") {
           ctx.ui.notify("No goal is being tracked.", "warning");
           return;
         }
@@ -426,7 +441,10 @@ export default function (pi: ExtensionAPI) {
     }
     setStatus(ctx);
     if (goal && ctx.hasUI) {
-      ctx.ui.notify(`Restored goal (${goal.status}): ${goal.objective}\nUse /goal resume to continue.`, "info");
+      ctx.ui.notify(
+        `Restored goal (${goal.status}): ${goal.objective}\nUse /goal resume to continue.`,
+        "info",
+      );
     }
   });
 }

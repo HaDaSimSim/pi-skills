@@ -7,11 +7,11 @@
 // Working 메시지:
 //   - 작업 중 경과 시간을 "Working... 3s" / "Working... 2m 15s" 형태로 실시간 표시
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -107,7 +107,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", () => {
     if (pendingMeta) {
       pi.sendMessage(
-        { customType: META_TYPE, content: pendingMeta.content, display: true, details: pendingMeta.details },
+        {
+          customType: META_TYPE,
+          content: pendingMeta.content,
+          display: true,
+          details: pendingMeta.details,
+        },
         { triggerTurn: false },
       );
       pendingMeta = undefined;
@@ -136,7 +141,11 @@ export default function (pi: ExtensionAPI) {
     // reload/resume 시 세션에서 마지막 메타를 복원
     const entries = ctx.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
-      const e = entries[i] as { type: string; customType?: string; details?: { model?: string; elapsed?: number } };
+      const e = entries[i] as {
+        type: string;
+        customType?: string;
+        details?: { model?: string; elapsed?: number };
+      };
       if (e.type === "custom_message" && e.customType === META_TYPE && e.details?.elapsed) {
         lastMeta = { model: e.details.model || "unknown", elapsed: e.details.elapsed };
         break;
@@ -149,7 +158,9 @@ export default function (pi: ExtensionAPI) {
       const unsub = footerData.onBranchChange(() => _tui.requestRender());
       requestRender = () => _tui.requestRender();
       return {
-        dispose() { unsub(); },
+        dispose() {
+          unsub();
+        },
         invalidate() {},
         render(width: number): string[] {
           // 토큰/코스트 누적
@@ -175,10 +186,24 @@ export default function (pi: ExtensionAPI) {
           const tokens = usage?.tokens ?? null;
           const { enabled: autoCompact, reserve } = compaction;
           const compactAt = window > 0 ? window - reserve : 0;
-          const dangerPct = autoCompact && compactAt > 0 && tokens !== null ? (tokens / compactAt) * 100 : (usage?.percent ?? 0);
-          const ctxText = tokens === null ? `?/${formatTokens(window)}` : `${formatTokens(tokens)}/${formatTokens(window)}`;
-          const ctxColored = dangerPct > 95 ? theme.fg("error", ctxText) : dangerPct > 80 ? theme.fg("warning", ctxText) : ctxText;
-          const compactMarker = autoCompact && compactAt > 0 && compactAt < window ? ` (${formatTokens(compactAt)})` : "";
+          const dangerPct =
+            autoCompact && compactAt > 0 && tokens !== null
+              ? (tokens / compactAt) * 100
+              : (usage?.percent ?? 0);
+          const ctxText =
+            tokens === null
+              ? `?/${formatTokens(window)}`
+              : `${formatTokens(tokens)}/${formatTokens(window)}`;
+          const ctxColored =
+            dangerPct > 95
+              ? theme.fg("error", ctxText)
+              : dangerPct > 80
+                ? theme.fg("warning", ctxText)
+                : ctxText;
+          const compactMarker =
+            autoCompact && compactAt > 0 && compactAt < window
+              ? ` (${formatTokens(compactAt)})`
+              : "";
 
           // 좌측 stats
           const stats: string[] = [];
@@ -187,7 +212,8 @@ export default function (pi: ExtensionAPI) {
           if (totalCacheRead) stats.push(`R${formatTokens(totalCacheRead)}`);
           if (totalCacheWrite) stats.push(`W${formatTokens(totalCacheWrite)}`);
           const usingSub = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
-          if (totalCost || usingSub) stats.push(`$${totalCost.toFixed(3)}${usingSub ? " (sub)" : ""}`);
+          if (totalCost || usingSub)
+            stats.push(`$${totalCost.toFixed(3)}${usingSub ? " (sub)" : ""}`);
           stats.push(ctxColored + theme.fg("dim", compactMarker));
           const left = stats.join(" ");
           const leftW = visibleWidth(left);
@@ -228,14 +254,18 @@ export default function (pi: ExtensionAPI) {
             let metaText = "";
             if (lastMeta) {
               const showModel = lastMeta.model !== (ctx.model?.id || "");
-              metaText = showModel ? `${lastMeta.model} · ${formatDuration(lastMeta.elapsed)}` : formatDuration(lastMeta.elapsed);
+              metaText = showModel
+                ? `${lastMeta.model} · ${formatDuration(lastMeta.elapsed)}`
+                : formatDuration(lastMeta.elapsed);
             }
             const rightPart = metaText ? theme.fg("dim", metaText) : "";
             const leftPartW = visibleWidth(leftPart);
             const rightPartW = visibleWidth(rightPart);
             if (leftPart && rightPart) {
               const gap = " ".repeat(Math.max(2, width - leftPartW - rightPartW));
-              lines.push(truncateToWidth(leftPart + gap + rightPart, width, theme.fg("dim", "...")));
+              lines.push(
+                truncateToWidth(leftPart + gap + rightPart, width, theme.fg("dim", "...")),
+              );
             } else if (leftPart) {
               lines.push(truncateToWidth(leftPart, width, theme.fg("dim", "...")));
             } else {

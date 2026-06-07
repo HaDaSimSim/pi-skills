@@ -13,7 +13,7 @@
 //       (이 파일과 shared/session-lock.ts 를 함께 배치하거나, 빌드시 인라인)
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { SessionLock, type LockRecord } from "./shared/session-lock.ts";
+import { type LockRecord, SessionLock } from "./shared/session-lock.ts";
 
 export default function (pi: ExtensionAPI) {
   // 자식 subagent 프로세스(`pi -p`, ꈁ리 세션)에서는 세션락을 걸지 않는다.
@@ -35,7 +35,12 @@ export default function (pi: ExtensionAPI) {
 
   // footer 의 다른 텍스트(cwd/토큰/모델)는 모두 dim 색이라 거기 맞춘다.
   const setLockStatus = (
-    ctx: { ui: { theme: { fg: (c: string, s: string) => string }; setStatus: (k: string, t: string | undefined) => void } },
+    ctx: {
+      ui: {
+        theme: { fg: (c: string, s: string) => string };
+        setStatus: (k: string, t: string | undefined) => void;
+      };
+    },
     text: string,
   ) => ctx.ui.setStatus("session-lock", ctx.ui.theme.fg("dim", text));
 

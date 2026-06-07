@@ -1,15 +1,25 @@
 # AGENTS.md
 
 Repo-level contract for coding agents. Cross-cutting workflow lives here; the
-per-directory contracts hold the local detail — read the relevant one before
-touching that area:
+per-directory contracts hold the local detail.
 
-- [`skills/AGENTS.md`](skills/AGENTS.md) — skill authoring (SKILL.md contract,
-  transports, stdout/stderr discipline, `.env` pattern).
-- [`extensions/AGENTS.md`](extensions/AGENTS.md) — extension authoring (symlink
-  model, hooks, self-containment rule).
-- [`scripts/AGENTS.md`](scripts/AGENTS.md) — `local-config.py` invariants.
-- [`internal/mcp/AGENTS.md`](internal/mcp/AGENTS.md) — shared MCP client rules.
+**Always read the relevant subdirectory's `AGENTS.md` and `README.md` before
+touching that area** — they are the source of truth for local rules and they
+override anything implied here. Each lists the contract for its own slice:
+
+- [`skills/AGENTS.md`](skills/AGENTS.md) · [`skills/README.md`](skills/README.md)
+  — skill authoring (SKILL.md contract, transports, stdout/stderr discipline,
+  `.env` pattern).
+- [`extensions/AGENTS.md`](extensions/AGENTS.md) · [`extensions/README.md`](extensions/README.md)
+  — extension authoring (symlink model, hooks, self-containment rule).
+- [`scripts/AGENTS.md`](scripts/AGENTS.md) · [`scripts/README.md`](scripts/README.md)
+  — `local-config.py` invariants and `check-extensions.py`.
+- [`internal/mcp/AGENTS.md`](internal/mcp/AGENTS.md) · [`internal/mcp/README.md`](internal/mcp/README.md)
+  — shared MCP client rules.
+
+These files are scattered across the tree — when in doubt, `find . -name
+AGENTS.md -o -name README.md` and read the one closest to the files you're
+changing.
 
 ## Why this exists
 
@@ -39,6 +49,14 @@ Two install mechanics drive almost everything:
   `internal/`. `python3` (stdlib only) required on `PATH` for the toggle file.
 - Skill binaries: tool output → **stdout only**; diagnostics/progress/errors →
   **stderr**. Mixing them breaks pi's output parsing.
+- **Lint / format / typecheck** live at the repo root, not in the Makefile:
+  `pnpm install` once installs [Biome](https://biomejs.dev) + [lefthook](https://lefthook.dev)
+  and wires the git hooks. TS is Biome-formatted (2-space) and type-checked via
+  `scripts/check-extensions.py` (resolves pi's globally installed types — no
+  committed `node_modules/`); Go stays `gofmt`-clean + `go vet` passing. The
+  lefthook **pre-commit** runs Biome + `gofmt` on staged files, **pre-push**
+  runs the full typecheck + `go vet`. Hooks call `./node_modules/.bin/*`
+  directly (not `pnpm exec`) so a broken global pnpm config can't block them.
 
 ## Adding things
 

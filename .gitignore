@@ -11,8 +11,5 @@ skills.local.json
 # JS/TS dependencies (built inside extension dirs, exposed via symlink)
 node_modules/
 
-# Local agent state
-.superpi/
-
 # OS / editor cruft
 .DS_Store

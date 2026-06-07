@@ -19,7 +19,7 @@ Each directory documents itself. Start there for details:
 | Directory | Docs | What's inside |
 |---|---|---|
 | [`skills/`](skills/README.md) | [README](skills/README.md) · [AGENTS](skills/AGENTS.md) | Go skill binaries (`ast-grep`, `context7`, `grep-search`, `update-models`, `websearch`). |
-| [`extensions/`](extensions/README.md) | [README](extensions/README.md) · [AGENTS](extensions/AGENTS.md) | TS extensions (`btw`, `goal`, `question`, `session-lock`, `subagents`, `telegram`, `ui-cosmetics`). |
+| [`extensions/`](extensions/README.md) | [README](extensions/README.md) · [AGENTS](extensions/AGENTS.md) | TS extensions (`btw`, `file-guards`, `goal`, `question`, `session-lock`, `stats`, `subagents`, `telegram`, `ui-cosmetics`). |
 | [`scripts/`](scripts/README.md) | [README](scripts/README.md) · [AGENTS](scripts/AGENTS.md) | `local-config.py` — the per-machine toggle reconciler. |
 | [`internal/mcp/`](internal/mcp/README.md) | [README](internal/mcp/README.md) · [AGENTS](internal/mcp/AGENTS.md) | Shared MCP HTTP/SSE client (used by `context7` and `grep-search`). |
 
@@ -84,3 +84,23 @@ current state.
 - **Secrets:** API keys come from an env var, falling back to a `.env` next to
   the binary (`chmod 600`, never commit). See each directory's docs for the
   exact env var names.
+
+## Linting & hooks
+
+TypeScript extensions are linted/formatted with [Biome](https://biomejs.dev)
+(2-space indent), type-checked against the globally installed pi types via
+`scripts/check-extensions.py`, and Go skills are kept `gofmt`-clean. A
+[lefthook](https://lefthook.dev) pre-commit hook runs Biome + `gofmt` on staged
+files; pre-push runs the full typecheck and `go vet`.
+
+```bash
+pnpm install        # installs Biome + lefthook, wires up git hooks
+pnpm run check      # biome lint + format check
+pnpm run check:fix  # biome autofix + format
+pnpm run typecheck  # tsc over every extension (via check-extensions.py)
+pnpm run go:vet     # go vet ./...
+```
+
+## License
+
+[MIT](LICENSE) © Mingeon Kim.

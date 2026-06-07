@@ -11,9 +11,9 @@
 //   - 세션별(파일별) / 글로벌(전체 합) / 일자별(UTC yyyy-mm-dd) / 모델별 / 툴별.
 //   - 툴 카운트는 assistant content 의 toolCall 블록 name 으로 센다("호출된 툴" 기준).
 
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as readline from "node:readline";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 // ─── 타입 ────────────────────────────────────────────────────────────────
 
@@ -247,7 +247,8 @@ function combine(sessions: SessionStats[]): AggregateStats {
     for (const d of s.days) agg.days.add(d);
     for (let h = 0; h < 24; h++) agg.byHour[h] += s.byHour[h] || 0;
     for (let w = 0; w < 7; w++) agg.byWeekday[w] += s.byWeekday[w] || 0;
-    if (s.startedAt > 0 && (agg.firstActivity === 0 || s.startedAt < agg.firstActivity)) agg.firstActivity = s.startedAt;
+    if (s.startedAt > 0 && (agg.firstActivity === 0 || s.startedAt < agg.firstActivity))
+      agg.firstActivity = s.startedAt;
     if (s.endedAt > agg.lastActivity) agg.lastActivity = s.endedAt;
   }
   agg.totalMessages = agg.userMessages + agg.assistantMessages + agg.toolResults;
@@ -316,7 +317,9 @@ export function computeStreak(days: Set<string>): StreakInfo {
   // 현재 streak: 오늘부터 거꾸로 연속된 날 세기. 오늘 활동이 없으면 어제부터.
   const set = new Set(nums);
   const now = new Date();
-  const today = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 86400000);
+  const today = Math.floor(
+    new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 86400000,
+  );
   let cursor = set.has(today) ? today : set.has(today - 1) ? today - 1 : Number.NaN;
   let current = 0;
   while (!Number.isNaN(cursor) && set.has(cursor)) {

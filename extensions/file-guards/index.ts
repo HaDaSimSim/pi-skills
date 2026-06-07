@@ -1,4 +1,4 @@
-// file-guards — 항상 켜진 범용 파일 안전 가드. superpi 와 무관하게 모든 세션에 적용.
+// file-guards — 항상 켜진 범용 파일 안전 가드. 모든 세션에 적용.
 //
 // OmO 의 write-existing-file-guard + edit-error-recovery 를 pi 로 이식한다.
 // 둘 다 "AI 의 자기보고를 안 믿고, 위험한 파일 조작을 코드로 막는다"는 정신.
@@ -15,9 +15,9 @@
 //
 // 설치: ~/.pi/agent/extensions/file-guards/ (make install 이 symlink)
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   // 이번 세션에서 read(또는 우리가 통과시킨 write/edit 로) 내용을 알게 된 파일 절대경로.

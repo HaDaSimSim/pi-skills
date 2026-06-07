@@ -59,7 +59,11 @@ function forkContextMessages(ctx: ExtensionCommandContext): Message[] {
 
 // ─── 결과 오버레이 ───────────────────────────────────────────────────────────
 
-async function showAnswer(question: string, answer: string, ctx: ExtensionCommandContext): Promise<void> {
+async function showAnswer(
+  question: string,
+  answer: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
   if (!ctx.hasUI) return;
   // pi-gui/pi-web: 터미널 오버레이 대신 호스트 어댑터로 마크다운 답변을 보여준다.
   const webUi = ctx.ui as unknown as { showBtw?: (q: string, a: string) => Promise<void> };
@@ -76,7 +80,9 @@ async function showAnswer(question: string, answer: string, ctx: ExtensionComman
     container.addChild(new Text(theme.fg("accent", theme.bold("💬 by the way")), 1, 0));
     container.addChild(new Text(theme.fg("dim", question), 1, 1));
     container.addChild(new Markdown(answer, 1, 0, mdTheme));
-    container.addChild(new Text(theme.fg("dim", "Enter/Esc to close · this is not saved to the conversation"), 1, 0));
+    container.addChild(
+      new Text(theme.fg("dim", "Enter/Esc to close · this is not saved to the conversation"), 1, 0),
+    );
     container.addChild(border);
 
     return {
@@ -149,46 +155,55 @@ export default function (pi: ExtensionAPI) {
           return;
         }
       } else {
-      // 진행 표시 + 단발 호출. Esc 로 취소.
-      answer = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-        const loader = new BorderedLoader(tui, theme, `Asking ${ctx.model!.id} (side question)...`);
-        loader.onAbort = () => done(null);
-
-        const ask = async (): Promise<string | null> => {
-          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
-          if (!auth.ok) {
-            throw new Error(auth.error);
-          }
-          if (!auth.apiKey) {
-            throw new Error(`No API key for ${ctx.model!.provider}`);
-          }
-
-          // complete() 는 도구 스키마를 전송하지 않는다 → 도구 없는 단발 응답.
-          // reasoning "off" 로 thinking 도 끈다 (Claude Code 의 maxThinkingTokens: 0).
-          const response = await complete(
-            ctx.model!,
-            { messages: forkedMessages },
-            { apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal, reasoning: "off" },
+        // 진행 표시 + 단발 호출. Esc 로 취소.
+        answer = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+          const loader = new BorderedLoader(
+            tui,
+            theme,
+            `Asking ${ctx.model!.id} (side question)...`,
           );
+          loader.onAbort = () => done(null);
 
-          if (response.stopReason === "aborted") return null;
+          const ask = async (): Promise<string | null> => {
+            const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
+            if (!auth.ok) {
+              throw new Error(auth.error);
+            }
+            if (!auth.apiKey) {
+              throw new Error(`No API key for ${ctx.model!.provider}`);
+            }
 
-          return response.content
-            .filter((c): c is { type: "text"; text: string } => c.type === "text")
-            .map((c) => c.text)
-            .join("\n")
-            .trim();
-        };
+            // complete() 는 도구 스키마를 전송하지 않는다 → 도구 없는 단발 응답.
+            // reasoning "off" 로 thinking 도 끈다 (Claude Code 의 maxThinkingTokens: 0).
+            const response = await complete(
+              ctx.model!,
+              { messages: forkedMessages },
+              {
+                apiKey: auth.apiKey,
+                headers: auth.headers,
+                signal: loader.signal,
+                reasoning: "off",
+              },
+            );
 
-        ask()
-          .then(done)
-          .catch((e: unknown) => {
-            ctx.ui.notify(`/btw failed: ${e instanceof Error ? e.message : String(e)}`, "error");
-            done(null);
-          });
+            if (response.stopReason === "aborted") return null;
 
-        return loader;
-      });
+            return response.content
+              .filter((c): c is { type: "text"; text: string } => c.type === "text")
+              .map((c) => c.text)
+              .join("\n")
+              .trim();
+          };
+
+          ask()
+            .then(done)
+            .catch((e: unknown) => {
+              ctx.ui.notify(`/btw failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+              done(null);
+            });
+
+          return loader;
+        });
       }
 
       if (answer === null) {

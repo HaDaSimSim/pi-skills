@@ -155,13 +155,13 @@ func parseArgs(args []string) (*options, error) {
 }
 
 type searchResult struct {
-	URL           string `json:"url"`
-	Title         string `json:"title"`
-	Content       string `json:"content"`
-	Engine        string `json:"engine"`
-	PublishedDate string `json:"publishedDate"`
+	URL           string  `json:"url"`
+	Title         string  `json:"title"`
+	Content       string  `json:"content"`
+	Engine        string  `json:"engine"`
+	PublishedDate string  `json:"publishedDate"`
 	Score         float64 `json:"score"`
-	Category      string `json:"category"`
+	Category      string  `json:"category"`
 }
 
 type infobox struct {
@@ -170,13 +170,13 @@ type infobox struct {
 }
 
 type searchResponse struct {
-	Query               string         `json:"query"`
-	NumberOfResults     float64        `json:"number_of_results"`
-	Results             []searchResult `json:"results"`
+	Query               string            `json:"query"`
+	NumberOfResults     float64           `json:"number_of_results"`
+	Results             []searchResult    `json:"results"`
 	Answers             []json.RawMessage `json:"answers"`
-	Suggestions         []string       `json:"suggestions"`
-	Infoboxes           []infobox      `json:"infoboxes"`
-	UnresponsiveEngines [][]any        `json:"unresponsive_engines"`
+	Suggestions         []string          `json:"suggestions"`
+	Infoboxes           []infobox         `json:"infoboxes"`
+	UnresponsiveEngines [][]any           `json:"unresponsive_engines"`
 }
 
 func main() {

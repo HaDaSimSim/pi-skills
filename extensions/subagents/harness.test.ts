@@ -4,7 +4,8 @@
 import { strict as assert } from "node:assert";
 
 const mod = await import("./transient.ts");
-const isTransientError = (mod as { isTransientError: (e: string | undefined) => boolean }).isTransientError;
+const isTransientError = (mod as { isTransientError: (e: string | undefined) => boolean })
+  .isTransientError;
 
 let passed = 0;
 const check = (label: string, cond: boolean) => {
@@ -42,12 +43,16 @@ const deterministic = [
   "no such file",
   "command not found",
 ];
-for (const e of deterministic) check(`deterministic: "${e.slice(0, 32)}"`, isTransientError(e) === false);
+for (const e of deterministic)
+  check(`deterministic: "${e.slice(0, 32)}"`, isTransientError(e) === false);
 
 // Edge cases
 check("undefined → not transient", isTransientError(undefined) === false);
 check("empty string → not transient", isTransientError("") === false);
 // A 500 that is also 'invalid' → deterministic wins (we bail on invalid)
-check("'invalid input (500)' → deterministic (invalid wins)", isTransientError("invalid input (500)") === false);
+check(
+  "'invalid input (500)' → deterministic (invalid wins)",
+  isTransientError("invalid input (500)") === false,
+);
 
 console.log(`\n✅ all ${passed} subagents transient-retry assertions passed`);

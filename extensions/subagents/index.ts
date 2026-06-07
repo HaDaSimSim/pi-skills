@@ -23,8 +23,21 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { type AgentToolResult, type ExtensionAPI, type ExtensionContext, type Theme, getAgentDir, rawKeyHint } from "@earendil-works/pi-coding-agent";
-import { type Focusable, type TUI, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+  type AgentToolResult,
+  type ExtensionAPI,
+  type ExtensionContext,
+  getAgentDir,
+  rawKeyHint,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import {
+  type Focusable,
+  matchesKey,
+  type TUI,
+  truncateToWidth,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentScope, discoverAgents, formatAgentList } from "./agents.ts";
 import { isTransientError } from "./transient.ts";
@@ -70,7 +83,8 @@ interface SubagentRun {
   startedAt: number;
   endedAt?: number;
   model?: string;
-  tools?: string[]; // follow-up 재실행 시 동일하게 적용
+  tools?: string[]; // follow-up 재실행 시 동일하게 적용 (--tools allowlist)
+  excludeTools?: string[]; // 차단할 도구 (--exclude-tools denylist). spawn 시 task별 지정.
   agentSystemPrompt?: string; // follow-up 재실행 시 시스템 프롬프트 재구성용 (빈 문자열=없음)
   sessionDir: string; // ꈁ리된 세션 저장 디렉터리 (메인 /resume 에 안 섮임)
   sessionId: string; // pi --session-id 로 쓰는 고정 id (= runId)
@@ -166,7 +180,10 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
   return { command: "pi", args };
 }
 
-async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
+async function writePromptToTempFile(
+  agentName: string,
+  prompt: string,
+): Promise<{ dir: string; filePath: string }> {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), `subagent-${agentName}-`));
   const filePath = path.join(dir, "system-prompt.md");
   await fs.promises.writeFile(filePath, prompt, "utf-8");
@@ -177,10 +194,16 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 export function flattenAssistant(msg: AssistantMessage): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   for (const c of msg.content) {
-    if (c.type === "thinking" && c.thinking?.trim()) items.push({ kind: "thinking", text: sanitizeForRender(c.thinking) });
-    else if (c.type === "text" && c.text?.trim()) items.push({ kind: "text", text: sanitizeForRender(c.text) });
+    if (c.type === "thinking" && c.thinking?.trim())
+      items.push({ kind: "thinking", text: sanitizeForRender(c.thinking) });
+    else if (c.type === "text" && c.text?.trim())
+      items.push({ kind: "text", text: sanitizeForRender(c.text) });
     else if (c.type === "toolCall")
-      items.push({ kind: "toolCall", text: sanitizeForRender(formatToolCallArgs(c.name, c.arguments ?? {})), toolName: c.name });
+      items.push({
+        kind: "toolCall",
+        text: sanitizeForRender(formatToolCallArgs(c.name, c.arguments ?? {})),
+        toolName: c.name,
+      });
   }
   return items;
 }
@@ -189,7 +212,7 @@ function formatToolCallArgs(toolName: string, args: Record<string, unknown>): st
   switch (toolName) {
     case "bash": {
       const cmd = String(args.command ?? "...");
-      return `$ ${cmd.length > 80 ? cmd.slice(0, 80) + "..." : cmd}`;
+      return `$ ${cmd.length > 80 ? `${cmd.slice(0, 80)}...` : cmd}`;
     }
     case "read": {
       const p = shortenPath(String(args.path ?? args.file_path ?? "..."));
@@ -207,7 +230,7 @@ function formatToolCallArgs(toolName: string, args: Record<string, unknown>): st
       return `ls ${shortenPath(String(args.path ?? "."))}`;
     default: {
       const s = JSON.stringify(args);
-      return `${toolName} ${s.length > 60 ? s.slice(0, 60) + "..." : s}`;
+      return `${toolName} ${s.length > 60 ? `${s.slice(0, 60)}...` : s}`;
     }
   }
 }
@@ -256,6 +279,8 @@ export function runSubagentTurn(
   ];
   if (run.model) args.push("--model", run.model);
   if (run.tools && run.tools.length > 0) args.push("--tools", run.tools.join(","));
+  if (run.excludeTools && run.excludeTools.length > 0)
+    args.push("--exclude-tools", run.excludeTools.join(","));
   if (systemPromptFile) args.push("--append-system-prompt", systemPromptFile);
   args.push(prompt);
 
@@ -271,7 +296,7 @@ export function runSubagentTurn(
         // (예: telegram)이 자식의 agent_end 에 반응해 이중 알림을 보내는 걸 막는다.
         // PI_WEB_HOST 는 제거: 자식은 진짜 pi CLI 이지 pi-gui 호스트가 아니다.
         env: (() => {
-          const e = { ...process.env, PI_SUBAGENT: "1" };
+          const e: NodeJS.ProcessEnv = { ...process.env, PI_SUBAGENT: "1" };
           delete e.PI_WEB_HOST;
           return e;
         })(),
@@ -326,7 +351,7 @@ export function runSubagentTurn(
             .trim();
           turn.transcript.push({
             kind: "toolResult",
-            text: sanitizeForRender(text.length > 500 ? text.slice(0, 500) + "…" : text),
+            text: sanitizeForRender(text.length > 500 ? `${text.slice(0, 500)}…` : text),
             toolName: tr.toolName,
           });
         }
@@ -404,8 +429,15 @@ const SubagentParams = Type.Object({
       ),
       task: Type.String({ description: "The task/instruction for this subagent." }),
       title: Type.String({
-        description: "Short, descriptive title for this subagent run, shown in the run list. Required.",
+        description:
+          "Short, descriptive title for this subagent run, shown in the run list. Required.",
       }),
+      excludeTools: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            'Optional denylist of tool names to disable for this subagent (e.g. ["edit", "write"] for a read-only reviewer). Applied on top of the agent\'s own tool config. Use this to spawn a subagent that can investigate but not modify files.',
+        }),
+      ),
       model: Type.Optional(
         Type.String({
           description:
@@ -413,7 +445,10 @@ const SubagentParams = Type.Object({
         }),
       ),
     }),
-    { description: "One or more subagent tasks to run concurrently in the background.", minItems: 1 },
+    {
+      description: "One or more subagent tasks to run concurrently in the background.",
+      minItems: 1,
+    },
   ),
   agentScope: Type.Optional(
     Type.Unsafe<AgentScope>({ type: "string", enum: ["user", "project", "both"], default: "user" }),
@@ -421,6 +456,13 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+  // 자식 subagent 안에서는 subagent 도구를 일절 등록하지 않는다.
+  // spawn 시 env 에 PI_SUBAGENT=1 이 박히므로(아래 runSubagentTurn 참고),
+  // 자식 pi 가 또 spawn_subagents 를 호출해 손주 subagent 를 띄우는 무한 재귀를
+  // 코드 레벨에서 차단한다. 자식은 자기만의 격리 세션이라 다룰 run 도 없어서
+  // list/fetch/send/abort 도 전부 무의미 — 통째로 건너뛴다.
+  if (process.env.PI_SUBAGENT === "1") return;
+
   // 메모리상의 진행 중/완료 run 들. 세션 복원 시 디스크에서 채운다.
   const runs = new Map<string, SubagentRun>();
   // 진행 중인 run 의 AbortController. abort_subagent 가 이걸 불러 자식을 죽인다.
@@ -443,7 +485,10 @@ export default function (pi: ExtensionAPI) {
     try {
       const viewHint = all.length > 0 ? rawKeyHint(VIEW_SHORTCUT, "view subagents") : "";
       if (running > 0) {
-        const label = ctx.ui.theme.fg("dim", `🤖 ${running} subagent${running > 1 ? "s" : ""} running`);
+        const label = ctx.ui.theme.fg(
+          "dim",
+          `🤖 ${running} subagent${running > 1 ? "s" : ""} running`,
+        );
         ctx.ui.setStatus("subagents", viewHint ? `${label} ${viewHint}` : label);
       } else if (all.length > 0) {
         ctx.ui.setStatus("subagents", viewHint);
@@ -468,7 +513,7 @@ export default function (pi: ExtensionAPI) {
     let promptFile: string | null = null;
     let tmpDir: string | null = null;
     try {
-      if (run.agentSystemPrompt && run.agentSystemPrompt.trim()) {
+      if (run.agentSystemPrompt?.trim()) {
         const tmp = await writePromptToTempFile(run.agent, run.agentSystemPrompt);
         promptFile = tmp.filePath;
         tmpDir = tmp.dir;
@@ -493,7 +538,11 @@ export default function (pi: ExtensionAPI) {
           const prevErr = run.error ?? "";
           // 실패한 turn 을 transcript 에서 제거(재시도가 새 turn 을 push 하므로 누적 방지).
           run.turns.pop();
-          run.error = `transient failure (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${backoffMs}ms: ${prevErr}`.slice(0, 500);
+          run.error =
+            `transient failure (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${backoffMs}ms: ${prevErr}`.slice(
+              0,
+              500,
+            );
           persistRun(run);
           updateWidget(ctx);
           await new Promise((r) => setTimeout(r, backoffMs));
@@ -562,7 +611,10 @@ export default function (pi: ExtensionAPI) {
         `Call fetch_subagent_result with subagentId "${run.runId}" for details.`;
     }
     const deliverAs = run.status === "done" && !aborted ? "followUp" : "steer";
-    pi.sendUserMessage(`[subagent ${run.runId} ${status}] ${note}`, ctx.isIdle() ? undefined : { deliverAs });
+    pi.sendUserMessage(
+      `[subagent ${run.runId} ${status}] ${note}`,
+      ctx.isIdle() ? undefined : { deliverAs },
+    );
     updateWidget(ctx);
   };
 
@@ -581,9 +633,11 @@ export default function (pi: ExtensionAPI) {
       "Each task may name an `agent` (a discovered preset with its own system prompt, tools, and default model),",
       "and/or set a `model` override. Omit `agent` to run a bare subagent with full tool access controlled only by `model`.",
       'Set `model` to "current" to reuse the parent\'s current model. `title` is a required short label for the run list.',
+      'Set `excludeTools` to restrict a subagent (e.g. ["edit","write"] for a read-only reviewer that can investigate but not modify files).',
       "Use this to parallelize independent investigation or work.",
     ].join(" "),
-    promptSnippet: "Run subagents concurrently in the background; fetch results by id when notified",
+    promptSnippet:
+      "Run subagents concurrently in the background; fetch results by id when notified",
     promptGuidelines: [
       "Use spawn_subagents to delegate independent tasks that can run in parallel without blocking you.",
       "Pick a specialized agent when one fits; otherwise omit agent and just set a model (use 'current' to match yourself).",
@@ -646,6 +700,7 @@ export default function (pi: ExtensionAPI) {
           startedAt: Date.now(),
           model,
           tools: agent?.tools,
+          excludeTools: t.excludeTools && t.excludeTools.length > 0 ? t.excludeTools : undefined,
           agentSystemPrompt: agent?.systemPrompt,
           sessionDir: path.join(subagentSessionRoot(), runId),
           sessionId: runId,
@@ -704,13 +759,19 @@ export default function (pi: ExtensionAPI) {
     async execute(): Promise<AgentToolResult<Record<string, unknown>>> {
       const all = [...runs.values()].sort((a, b) => b.startedAt - a.startedAt);
       if (all.length === 0) {
-        return { content: [{ type: "text", text: "No subagents in this session yet." }], details: {} };
+        return {
+          content: [{ type: "text", text: "No subagents in this session yet." }],
+          details: {},
+        };
       }
       const lines = all.map((r) => {
         const unread = r.unreadTurns.length > 0 ? ` · ${r.unreadTurns.length} unread` : "";
-        return `${statusIcon[r.status]} ${r.runId}  "${r.title}"  [${r.agent}${r.model ? ", " + r.model : ""}]  ${r.turns.length} turn(s)${unread}`;
+        return `${statusIcon[r.status]} ${r.runId}  "${r.title}"  [${r.agent}${r.model ? `, ${r.model}` : ""}]  ${r.turns.length} turn(s)${unread}`;
       });
-      return { content: [{ type: "text", text: lines.join("\n") }], details: { count: all.length } };
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        details: { count: all.length },
+      };
     },
   });
 
@@ -723,21 +784,32 @@ export default function (pi: ExtensionAPI) {
       "Set all=true to return every turn's output regardless of read state. Use the id from the '[subagent <id> finished]' notification or list_subagents.",
     promptSnippet: "Fetch a subagent's unread response by id",
     parameters: Type.Object({
-      subagentId: Type.String({ description: "The subagent run id (e.g. from the finished notification)." }),
+      subagentId: Type.String({
+        description: "The subagent run id (e.g. from the finished notification).",
+      }),
       all: Type.Optional(
-        Type.Boolean({ description: "If true, return all turns, not just unread ones. Default false." }),
+        Type.Boolean({
+          description: "If true, return all turns, not just unread ones. Default false.",
+        }),
       ),
     }),
     async execute(_id, params): Promise<AgentToolResult<Record<string, unknown>>> {
       const run = runs.get(params.subagentId);
       if (!run) {
         return {
-          content: [{ type: "text", text: `No subagent found with id "${params.subagentId}". Use list_subagents to see ids.` }],
+          content: [
+            {
+              type: "text",
+              text: `No subagent found with id "${params.subagentId}". Use list_subagents to see ids.`,
+            },
+          ],
           details: { found: false },
         };
       }
       const wantAll = params.all === true;
-      const indices = wantAll ? run.turns.map((_, i) => i) : [...run.unreadTurns].sort((a, b) => a - b);
+      const indices = wantAll
+        ? run.turns.map((_, i) => i)
+        : [...run.unreadTurns].sort((a, b) => a - b);
       if (indices.length === 0) {
         return {
           content: [
@@ -769,7 +841,12 @@ export default function (pi: ExtensionAPI) {
       }
       return {
         content: [{ type: "text", text: parts.join("\n") }],
-        details: { found: true, status: run.status, returned: indices.length, remainingUnread: run.unreadTurns.length },
+        details: {
+          found: true,
+          status: run.status,
+          returned: indices.length,
+          remainingUnread: run.unreadTurns.length,
+        },
       };
     },
   });
@@ -803,7 +880,12 @@ export default function (pi: ExtensionAPI) {
       const run = runs.get(params.subagentId);
       if (!run) {
         return {
-          content: [{ type: "text", text: `No subagent found with id "${params.subagentId}". Use list_subagents to see ids.` }],
+          content: [
+            {
+              type: "text",
+              text: `No subagent found with id "${params.subagentId}". Use list_subagents to see ids.`,
+            },
+          ],
           details: { found: false },
         };
       }
@@ -881,13 +963,19 @@ export default function (pi: ExtensionAPI) {
       const run = runs.get(params.subagentId);
       if (!run) {
         return {
-          content: [{ type: "text", text: `No subagent found with id "${params.subagentId}". Use list_subagents to see ids.` }],
+          content: [
+            {
+              type: "text",
+              text: `No subagent found with id "${params.subagentId}". Use list_subagents to see ids.`,
+            },
+          ],
           details: { found: false },
         };
       }
       const controller = controllers.get(run.runId);
       // 대기 중인 follow-up 과 steer 요청도 함께 비운다(abort 는 사용자의 명시적 중단).
-      const hadQueue = (pendingFollowUps.get(run.runId)?.length ?? 0) > 0 || steerRequests.has(run.runId);
+      const hadQueue =
+        (pendingFollowUps.get(run.runId)?.length ?? 0) > 0 || steerRequests.has(run.runId);
       pendingFollowUps.delete(run.runId);
       steerRequests.delete(run.runId);
       if (!controller || run.status !== "running") {
@@ -1023,9 +1111,12 @@ class SubagentViewer implements Focusable {
       // 리스트: ↑↓ / j k 로 선택 이동, PgUp/PgDn / space b 로 점프, g/G 로 처음·끝.
       const last = this.runs.length - 1;
       if (matchesKey(data, "up") || data === "k") this.selected = Math.max(0, this.selected - 1);
-      else if (matchesKey(data, "down") || data === "j") this.selected = Math.min(last, this.selected + 1);
-      else if (matchesKey(data, "pageUp") || data === "b") this.selected = Math.max(0, this.selected - 10);
-      else if (matchesKey(data, "pageDown") || data === " ") this.selected = Math.min(last, this.selected + 10);
+      else if (matchesKey(data, "down") || data === "j")
+        this.selected = Math.min(last, this.selected + 1);
+      else if (matchesKey(data, "pageUp") || data === "b")
+        this.selected = Math.max(0, this.selected - 10);
+      else if (matchesKey(data, "pageDown") || data === " ")
+        this.selected = Math.min(last, this.selected + 10);
       else if (data === "g" || matchesKey(data, "home")) this.selected = 0;
       else if (data === "G" || matchesKey(data, "end")) this.selected = last;
       else if (matchesKey(data, "return")) {
@@ -1038,7 +1129,8 @@ class SubagentViewer implements Focusable {
       const page = this.pageStep;
       if (matchesKey(data, "up") || data === "k") this.scroll = Math.max(0, this.scroll - 1);
       else if (matchesKey(data, "down") || data === "j") this.scroll += 1;
-      else if (matchesKey(data, "pageUp") || data === "b") this.scroll = Math.max(0, this.scroll - page);
+      else if (matchesKey(data, "pageUp") || data === "b")
+        this.scroll = Math.max(0, this.scroll - page);
       else if (matchesKey(data, "pageDown") || data === " ") this.scroll += page;
       else if (data === "g" || matchesKey(data, "home")) this.scroll = 0;
       else if (data === "G" || matchesKey(data, "end")) this.scroll = Number.MAX_SAFE_INTEGER; // render 가 maxScroll 로 clamp
@@ -1052,14 +1144,18 @@ class SubagentViewer implements Focusable {
       th.fg("accent", " 🤖 Subagent runs") + th.fg("dim", `  (${this.runs.length})`),
       "",
     ];
-    const footer = th.fg("dim", ` ↑↓/jk select · space/b page · g/G ends · Enter open · Esc/${formatKeyLabel(VIEW_SHORTCUT)} close`);
+    const footer = th.fg(
+      "dim",
+      ` ↑↓/jk select · space/b page · g/G ends · Enter open · Esc/${formatKeyLabel(VIEW_SHORTCUT)} close`,
+    );
     const viewport = Math.max(2, rows - header.length - 1); // 1 = footer
 
     // 각 run 은 2줄(제목 + 메타). 선택 항목이 뷰포트 안에 들어오도록 스크롤 행을 맞춘다.
     const rowsPerItem = 2;
     const itemsVisible = Math.max(1, Math.floor(viewport / rowsPerItem));
     if (this.selected < this.listScroll) this.listScroll = this.selected;
-    else if (this.selected >= this.listScroll + itemsVisible) this.listScroll = this.selected - itemsVisible + 1;
+    else if (this.selected >= this.listScroll + itemsVisible)
+      this.listScroll = this.selected - itemsVisible + 1;
     const maxListScroll = Math.max(0, this.runs.length - itemsVisible);
     if (this.listScroll > maxListScroll) this.listScroll = maxListScroll;
 
@@ -1074,12 +1170,11 @@ class SubagentViewer implements Focusable {
       const unread = r.unreadTurns.length > 0 ? th.fg("accent", ` ●${r.unreadTurns.length}`) : "";
       // 제목을 먼저 크게, 그 다음줄에 agent/메타.
       const titleMax = Math.max(12, innerW - 12);
-      const title = r.title.length > titleMax ? r.title.slice(0, titleMax) + "…" : r.title;
+      const title = r.title.length > titleMax ? `${r.title.slice(0, titleMax)}…` : r.title;
       const head = `${statusIcon[r.status]} ${title}`;
       body.push(`${prefix}${sel ? th.fg("text", head) : th.fg("muted", head)}${unread}`);
       body.push(
-        "   " +
-          th.fg("dim", `${r.agent} · ${dur} · ${stats}${r.model ? " · " + r.model : ""}`),
+        `   ${th.fg("dim", `${r.agent} · ${dur} · ${stats}${r.model ? ` · ${r.model}` : ""}`)}`,
       );
     }
 
@@ -1087,7 +1182,7 @@ class SubagentViewer implements Focusable {
     // 풀스크린을 채우도록 footer 앞에 빈 줄 패딩.
     while (lines.length < rows - 1) lines.push("");
     lines.push(footer);
-    return lines.map((l) => truncateToWidth(" " + l, innerW + 2));
+    return lines.map((l) => truncateToWidth(` ${l}`, innerW + 2));
   }
 
   private renderDetail(innerW: number): string[] {
@@ -1095,13 +1190,26 @@ class SubagentViewer implements Focusable {
     const rows = this.rows;
     const r = this.runs[this.selected];
     const head: string[] = [];
-    head.push(th.fg("accent", ` ${statusIcon[r.status]} ${r.title}`) + th.fg("dim", `  (${r.runId} · ${r.agent})`));
+    head.push(
+      th.fg("accent", ` ${statusIcon[r.status]} ${r.title}`) +
+        th.fg("dim", `  (${r.runId} · ${r.agent})`),
+    );
     if (r.error) head.push(th.fg("error", ` Error: ${r.error}`));
-    head.push(th.fg("dim", " " + "─".repeat(Math.max(4, innerW - 2))));
+    head.push(th.fg("dim", ` ${"─".repeat(Math.max(4, innerW - 2))}`));
 
     // 모든 turn 을 순회해 프롬프트 + 트랜스크립트를 보여준다.
     const body: string[] = [];
-    const turns = r.turns.length > 0 ? r.turns : [{ prompt: r.task, transcript: r.transcript, finalOutput: r.finalOutput, startedAt: r.startedAt } as Turn];
+    const turns =
+      r.turns.length > 0
+        ? r.turns
+        : [
+            {
+              prompt: r.task,
+              transcript: r.transcript,
+              finalOutput: r.finalOutput,
+              startedAt: r.startedAt,
+            } as Turn,
+          ];
     for (let ti = 0; ti < turns.length; ti++) {
       const turn = turns[ti];
       if (turns.length > 1 || ti > 0) {
@@ -1109,15 +1217,22 @@ class SubagentViewer implements Focusable {
       }
       body.push(th.fg("dim", `  📤 prompt`));
       for (const raw of sanitizeForRender(turn.prompt).split("\n")) {
-        for (const w of wrapTextWithAnsi(raw, innerW - 4)) body.push("    " + th.fg("muted", w));
+        for (const w of wrapTextWithAnsi(raw, innerW - 4)) body.push(`    ${th.fg("muted", w)}`);
       }
       for (const item of turn.transcript) {
         const label = kindLabel[item.kind];
         const color =
-          item.kind === "thinking" ? "dim" : item.kind === "toolCall" ? "accent" : item.kind === "toolResult" ? "muted" : "text";
-        body.push(th.fg("dim", `  ${label}${item.toolName ? " " + item.toolName : ""}`));
+          item.kind === "thinking"
+            ? "dim"
+            : item.kind === "toolCall"
+              ? "accent"
+              : item.kind === "toolResult"
+                ? "muted"
+                : "text";
+        body.push(th.fg("dim", `  ${label}${item.toolName ? ` ${item.toolName}` : ""}`));
         for (const raw of item.text.split("\n")) {
-          for (const w of wrapTextWithAnsi(raw, innerW - 4)) body.push("    " + th.fg(color as never, w));
+          for (const w of wrapTextWithAnsi(raw, innerW - 4))
+            body.push(`    ${th.fg(color as never, w)}`);
         }
       }
     }
@@ -1136,7 +1251,7 @@ class SubagentViewer implements Focusable {
     const lines = [...head, ...slice];
     while (lines.length < rows - 1) lines.push("");
     lines.push(footer);
-    return lines.map((l) => truncateToWidth(" " + l, innerW + 2));
+    return lines.map((l) => truncateToWidth(` ${l}`, innerW + 2));
   }
 
   render(width: number): string[] {

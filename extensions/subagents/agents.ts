@@ -98,7 +98,8 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 
   const bundledAgents = loadAgentsFromDir(bundledDir, "bundled");
   const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
-  const projectAgents = scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
+  const projectAgents =
+    scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
 
   const agentMap = new Map<string, AgentConfig>();
   // 번들 → user → project 순으로 덮어 우선순위 적용.
@@ -114,7 +115,10 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
   return { agents: Array.from(agentMap.values()), projectAgentsDir };
 }
 
-export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {
+export function formatAgentList(
+  agents: AgentConfig[],
+  maxItems: number,
+): { text: string; remaining: number } {
   if (agents.length === 0) return { text: "none", remaining: 0 };
   const listed = agents.slice(0, maxItems);
   const remaining = agents.length - listed.length;

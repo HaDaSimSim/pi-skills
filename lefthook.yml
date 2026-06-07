@@ -1,0 +1,29 @@
+# Lefthook git hooks for pi-skills.
+# Install once with `pnpm install` (runs `lefthook install` via the prepare script).
+# Docs: https://lefthook.dev
+
+pre-commit:
+  parallel: true
+  jobs:
+    - name: biome
+      glob: "extensions/**/*.{ts,js,json}"
+      run: ./node_modules/.bin/biome check --write --no-errors-on-unmatched {staged_files}
+      stage_fixed: true
+
+    - name: gofmt
+      glob: "*.go"
+      run: gofmt -w {staged_files}
+      stage_fixed: true
+
+    - name: go-vet
+      glob: "*.go"
+      run: go vet ./...
+
+pre-push:
+  parallel: true
+  jobs:
+    - name: typecheck
+      run: ./scripts/check-extensions.py extensions/btw extensions/file-guards extensions/goal extensions/question extensions/session-lock extensions/stats extensions/subagents extensions/telegram extensions/ui-cosmetics
+
+    - name: go-vet
+      run: go vet ./...

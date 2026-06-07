@@ -1,0 +1,24 @@
+{
+  "name": "pi-skills",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Tooling root for pi-skills: lint, format, and pre-commit hooks. The skills/extensions themselves are built via the Makefile.",
+  "packageManager": "pnpm@11.5.2",
+  "scripts": {
+    "lint": "biome lint extensions",
+    "format": "biome format --write extensions",
+    "format:check": "biome format extensions",
+    "check": "biome check extensions",
+    "check:fix": "biome check --write extensions",
+    "typecheck": "scripts/check-extensions.py extensions/btw extensions/file-guards extensions/goal extensions/question extensions/session-lock extensions/stats extensions/subagents extensions/telegram extensions/ui-cosmetics",
+    "go:fmt": "gofmt -w $(find . -name '*.go' -not -path '*/node_modules/*')",
+    "go:fmt:check": "test -z \"$(gofmt -l $(find . -name '*.go' -not -path '*/node_modules/*'))\"",
+    "go:vet": "go vet ./...",
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.16",
+    "lefthook": "2.1.9"
+  }
+}

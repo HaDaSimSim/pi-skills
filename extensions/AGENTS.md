@@ -62,6 +62,11 @@ quietly (`telegram`), not error.
    `skills.local.json` under `extensions` as `true`.
 4. `/reload` inside pi — auto-discovery picks the new entry up.
 
+Before committing, the lefthook hooks (installed via `pnpm install` at the repo
+root) run Biome format/lint and `scripts/check-extensions.py` over the
+extensions; run `pnpm run check` / `pnpm run typecheck` manually if you want to
+verify ahead of the hook. Keep to 2-space indent (Biome's config).
+
 After the first install, editing the extension needs only `/reload` — the
 symlink means pi already sees your changes.
 

@@ -26,7 +26,7 @@
 // 프로세스에선 뜨지 않게 PI_SUBAGENT 가드.
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Focusable, type TUI, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Focusable, matchesKey, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import {
   type AggregateStats,
   aggregateGlobal,
@@ -35,7 +35,17 @@ import {
   type SessionStats,
   statsFromSession,
 } from "./aggregate.ts";
-import { type BarRow, formatCost, formatInt, formatTokens, type KV, renderBars, renderBox, renderHourHeatmap, truncate } from "./format.ts";
+import {
+  type BarRow,
+  formatCost,
+  formatInt,
+  formatTokens,
+  type KV,
+  renderBars,
+  renderBox,
+  renderHourHeatmap,
+  truncate,
+} from "./format.ts";
 
 export default function statsExtension(pi: ExtensionAPI) {
   if (process.env.PI_SUBAGENT) return; // 자식 프로세스에선 비활성
@@ -67,7 +77,8 @@ export default function statsExtension(pi: ExtensionAPI) {
     ctx.ui.setStatus("stats", undefined);
 
     await ctx.ui.custom<void>(
-      (tui, theme, _kb, done) => new StatsViewer(sessionAgg, globalAgg, sessionFile, theme, tui, done),
+      (tui, theme, _kb, done) =>
+        new StatsViewer(sessionAgg, globalAgg, sessionFile, theme, tui, done),
       {
         overlay: true,
         overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left" },
@@ -151,7 +162,10 @@ class StatsViewer implements Focusable {
     }
 
     // 탭 전환 (dashboard 에서만)
-    if (this.view === "dashboard" && (matchesKey(data, "tab") || matchesKey(data, "left") || matchesKey(data, "right"))) {
+    if (
+      this.view === "dashboard" &&
+      (matchesKey(data, "tab") || matchesKey(data, "left") || matchesKey(data, "right"))
+    ) {
       this.tab = this.tab === "session" ? "global" : "session";
       this.scroll = 0;
       return;
@@ -176,7 +190,8 @@ class StatsViewer implements Focusable {
     const page = this.pageStep;
     if (matchesKey(data, "up") || data === "k") this.scroll = Math.max(0, this.scroll - 1);
     else if (matchesKey(data, "down") || data === "j") this.scroll += 1;
-    else if (matchesKey(data, "pageUp") || data === "b") this.scroll = Math.max(0, this.scroll - page);
+    else if (matchesKey(data, "pageUp") || data === "b")
+      this.scroll = Math.max(0, this.scroll - page);
     else if (matchesKey(data, "pageDown") || data === " ") this.scroll += page;
     else if (data === "g" || matchesKey(data, "home")) this.scroll = 0;
     else if (data === "G" || matchesKey(data, "end")) this.scroll = Number.MAX_SAFE_INTEGER;
@@ -185,9 +200,12 @@ class StatsViewer implements Focusable {
   private handleListInput(data: string): void {
     const last = this.globalAgg.sessions.length - 1;
     if (matchesKey(data, "up") || data === "k") this.selected = Math.max(0, this.selected - 1);
-    else if (matchesKey(data, "down") || data === "j") this.selected = Math.min(last, this.selected + 1);
-    else if (matchesKey(data, "pageUp") || data === "b") this.selected = Math.max(0, this.selected - 10);
-    else if (matchesKey(data, "pageDown") || data === " ") this.selected = Math.min(last, this.selected + 10);
+    else if (matchesKey(data, "down") || data === "j")
+      this.selected = Math.min(last, this.selected + 1);
+    else if (matchesKey(data, "pageUp") || data === "b")
+      this.selected = Math.max(0, this.selected - 10);
+    else if (matchesKey(data, "pageDown") || data === " ")
+      this.selected = Math.min(last, this.selected + 10);
     else if (data === "g" || matchesKey(data, "home")) this.selected = 0;
     else if (data === "G" || matchesKey(data, "end")) this.selected = last;
     else if (matchesKey(data, "return")) {
@@ -216,11 +234,16 @@ class StatsViewer implements Focusable {
       const lines = [...header, ...body];
       while (lines.length < rows - 1) lines.push("");
       lines.push(footer);
-      return lines.map((l) => truncateToWidth(" " + l, innerW + 2));
+      return lines.map((l) => truncateToWidth(` ${l}`, innerW + 2));
     }
 
     // dashboard / detail: 전체 body 를 만든 뒤 scroll 로 슬라이스
-    const agg = this.view === "detail" ? this.detailAgg! : this.tab === "session" ? this.sessionAgg : this.globalAgg;
+    const agg =
+      this.view === "detail"
+        ? this.detailAgg!
+        : this.tab === "session"
+          ? this.sessionAgg
+          : this.globalAgg;
     body = this.renderDashboard(innerW, agg, this.tab === "global" && this.view === "dashboard");
 
     const maxScroll = Math.max(0, body.length - viewport);
@@ -230,7 +253,7 @@ class StatsViewer implements Focusable {
     const lines = [...header, ...slice];
     while (lines.length < rows - 1) lines.push("");
     lines.push(this.renderFooterWithScroll(innerW, body.length, viewport));
-    return lines.map((l) => truncateToWidth(" " + l, innerW + 2));
+    return lines.map((l) => truncateToWidth(` ${l}`, innerW + 2));
   }
 
   private renderHeader(innerW: number): string[] {
@@ -239,21 +262,23 @@ class StatsViewer implements Focusable {
       const s = this.detailAgg!.sessions[0];
       const label = sessionLabel(s);
       return [
-        " " + th.bold(th.fg("accent", "📊 pi stats")) + th.fg("dim", "  ▸ session detail"),
-        " " + th.fg("text", truncate(label, innerW - 4)),
+        ` ${th.bold(th.fg("accent", "📊 pi stats"))}${th.fg("dim", "  ▸ session detail")}`,
+        ` ${th.fg("text", truncate(label, innerW - 4))}`,
         "",
       ];
     }
     if (this.view === "list") {
       return [
-        " " + th.bold(th.fg("accent", "📊 pi stats")) + th.fg("dim", `  ▸ sessions (${this.globalAgg.sessions.length})`),
+        " " +
+          th.bold(th.fg("accent", "📊 pi stats")) +
+          th.fg("dim", `  ▸ sessions (${this.globalAgg.sessions.length})`),
         "",
       ];
     }
     // dashboard: 탭바
     const sessionTab = this.tabLabel("Session", this.tab === "session");
     const globalTab = this.tabLabel("Global", this.tab === "global");
-    return [" " + th.bold(th.fg("accent", "📊 pi stats")) + "   " + sessionTab + " " + globalTab, ""];
+    return [` ${th.bold(th.fg("accent", "📊 pi stats"))}   ${sessionTab} ${globalTab}`, ""];
   }
 
   private tabLabel(text: string, active: boolean): string {
@@ -266,7 +291,7 @@ class StatsViewer implements Focusable {
     return this.renderFooterWithScroll(innerW, 0, 0);
   }
 
-  private renderFooterWithScroll(innerW: number, bodyLen: number, viewport: number): string {
+  private renderFooterWithScroll(_innerW: number, bodyLen: number, viewport: number): string {
     const th = this.theme;
     let keys: string;
     if (this.view === "list") {
@@ -278,11 +303,15 @@ class StatsViewer implements Focusable {
       keys = `Tab/←→ switch · ↑↓/jk scroll · space/b page${sessionKey} · q/Esc close`;
     }
     let pos = "";
-    if ((this.view === "dashboard" || this.view === "detail") && bodyLen > viewport && viewport > 0) {
+    if (
+      (this.view === "dashboard" || this.view === "detail") &&
+      bodyLen > viewport &&
+      viewport > 0
+    ) {
       const end = Math.min(bodyLen, this.scroll + viewport);
       pos = `  [${this.scroll + 1}-${end}/${bodyLen}]`;
     }
-    return th.fg("dim", " " + keys + pos);
+    return th.fg("dim", ` ${keys}${pos}`);
   }
 
   // 대시보드 본문: Overview, Cost & Tokens, Models, Tools (+ Global 이면 활동 일자).
@@ -293,9 +322,12 @@ class StatsViewer implements Focusable {
 
     if (agg.totalMessages === 0 && agg.totalSessions === 0) {
       out.push("");
-      out.push(" " + th.fg("muted", "No usage data yet."));
+      out.push(` ${th.fg("muted", "No usage data yet.")}`);
       if (this.tab === "session" && !this.sessionFile) {
-        out.push(" " + th.fg("dim", "This is an ephemeral session (--no-session), so nothing is recorded."));
+        out.push(
+          " " +
+            th.fg("dim", "This is an ephemeral session (--no-session), so nothing is recorded."),
+        );
       }
       return out;
     }
@@ -303,7 +335,8 @@ class StatsViewer implements Focusable {
     // Overview
     const days = agg.days.size;
     const overview: KV[] = [];
-    if (isGlobal) overview.push({ label: "Sessions", value: formatInt(agg.totalSessions), accent: true });
+    if (isGlobal)
+      overview.push({ label: "Sessions", value: formatInt(agg.totalSessions), accent: true });
     overview.push({ label: "Messages", value: formatInt(agg.totalMessages), accent: true });
     overview.push({ label: "  User", value: formatInt(agg.userMessages) });
     overview.push({ label: "  Assistant", value: formatInt(agg.assistantMessages) });
@@ -311,7 +344,11 @@ class StatsViewer implements Focusable {
     if (days > 0) overview.push({ label: "Active days", value: formatInt(days) });
     const streak = computeStreak(agg.days);
     if (streak.current > 0 || streak.longest > 0) {
-      overview.push({ label: "Current streak", value: `${streak.current}d`, accent: streak.current > 0 });
+      overview.push({
+        label: "Current streak",
+        value: `${streak.current}d`,
+        accent: streak.current > 0,
+      });
       overview.push({ label: "Longest streak", value: `${streak.longest}d` });
     }
     if (agg.firstActivity > 0) {
@@ -334,7 +371,8 @@ class StatsViewer implements Focusable {
     costRows.push({ label: "Input tokens", value: formatTokens(t.input) });
     costRows.push({ label: "Output tokens", value: formatTokens(t.output) });
     if (t.cacheRead > 0) costRows.push({ label: "Cache read", value: formatTokens(t.cacheRead) });
-    if (t.cacheWrite > 0) costRows.push({ label: "Cache write", value: formatTokens(t.cacheWrite) });
+    if (t.cacheWrite > 0)
+      costRows.push({ label: "Cache write", value: formatTokens(t.cacheWrite) });
     costRows.push({ label: "Total tokens", value: formatTokens(t.input + t.output), accent: true });
     pushSection(out, renderBox(th, boxW, "Cost & Tokens", costRows));
 
@@ -378,7 +416,7 @@ class StatsViewer implements Focusable {
 
     // Global dashboard: 세션 리스트 진입 힌트
     if (isGlobal && agg.sessions.length > 0) {
-      out.push(" " + th.fg("dim", `Press 's' to browse ${agg.sessions.length} sessions →`));
+      out.push(` ${th.fg("dim", `Press 's' to browse ${agg.sessions.length} sessions →`)}`);
       out.push("");
     }
 
@@ -393,7 +431,8 @@ class StatsViewer implements Focusable {
     const itemsVisible = Math.max(1, Math.floor(viewport / rowsPerItem));
 
     if (this.selected < this.listScroll) this.listScroll = this.selected;
-    else if (this.selected >= this.listScroll + itemsVisible) this.listScroll = this.selected - itemsVisible + 1;
+    else if (this.selected >= this.listScroll + itemsVisible)
+      this.listScroll = this.selected - itemsVisible + 1;
     const maxListScroll = Math.max(0, sessions.length - itemsVisible);
     if (this.listScroll > maxListScroll) this.listScroll = maxListScroll;
 
@@ -411,9 +450,11 @@ class StatsViewer implements Focusable {
       const meta = `${formatCost(s.tokens.cost)} · ${tokens} tok · ${s.assistantMessages} msg · ${formatDate(s.endedAt)}`;
       const cwdShort = shortCwd(s.cwd);
       body.push(head);
-      body.push("     " + th.fg("dim", `${meta}  ·  ${truncate(cwdShort, Math.max(10, innerW - 50))}`));
+      body.push(
+        `     ${th.fg("dim", `${meta}  ·  ${truncate(cwdShort, Math.max(10, innerW - 50))}`)}`,
+      );
     }
-    if (sessions.length === 0) body.push(" " + th.fg("dim", "(no sessions)"));
+    if (sessions.length === 0) body.push(` ${th.fg("dim", "(no sessions)")}`);
     return body;
   }
 
@@ -437,7 +478,7 @@ function sessionLabel(s: SessionStats): string {
 function shortCwd(cwd: string): string {
   if (!cwd) return "";
   const home = process.env.HOME;
-  if (home && cwd.startsWith(home)) return "~" + cwd.slice(home.length);
+  if (home && cwd.startsWith(home)) return `~${cwd.slice(home.length)}`;
   return cwd;
 }
 

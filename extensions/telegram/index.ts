@@ -10,9 +10,9 @@
 //   TELEGRAM_CHAT_ID=...
 //   TELEGRAM_MIN_SECONDS=30  (선택, 기본 30)
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFileSync, realpathSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { dirname, join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -37,7 +37,10 @@ function loadConfig(): TelegramConfig | null {
         const trimmed = line.trim();
         if (trimmed.startsWith("#") || !trimmed.includes("=")) continue;
         const [key, ...rest] = trimmed.split("=");
-        const value = rest.join("=").trim().replace(/^["']|["']$/g, "");
+        const value = rest
+          .join("=")
+          .trim()
+          .replace(/^["']|["']$/g, "");
         if (key === "TELEGRAM_BOT_TOKEN" && !botToken) botToken = value;
         if (key === "TELEGRAM_CHAT_ID" && !chatId) chatId = value;
         if (key === "TELEGRAM_MIN_SECONDS") minSeconds = parseInt(value, 10) || 30;
@@ -120,7 +123,11 @@ async function tgEdit(config: TelegramConfig, messageId: number, text: string): 
 }
 
 // 콜백 쿼리 응답 (버튼 누른 사람에게 토스트).
-async function tgAnswerCallback(config: TelegramConfig, callbackId: string, text?: string): Promise<void> {
+async function tgAnswerCallback(
+  config: TelegramConfig,
+  callbackId: string,
+  text?: string,
+): Promise<void> {
   await tgCall(config, "answerCallbackQuery", {
     callback_query_id: callbackId,
     ...(text ? { text, show_alert: true } : {}),
@@ -131,7 +138,6 @@ async function tgAnswerCallback(config: TelegramConfig, callbackId: string, text
 async function tgDelete(config: TelegramConfig, messageId: number): Promise<void> {
   await tgCall(config, "deleteMessage", { chat_id: config.chatId, message_id: messageId });
 }
-
 
 // ─── Extension ─────────────────────────────────────────────────────────────
 
@@ -180,23 +186,39 @@ export default function (pi: ExtensionAPI) {
   });
 
   // goal 연동: goal extension이 이벤트를 emit하면 받아서 알림
-  unsubs.push(pi.events.on("goal:status-change", (data) => {
-    const { status, objective, note } = data as { status: string; objective: string; note?: string };
-    if (status === "achieved") {
-      sendTelegram(config, `✅ *Goal achieved*\n🎯 ${objective}\n📝 ${note || ""}`);
-    } else if (status === "blocked") {
-      sendTelegram(config, `🚧 *Goal blocked*\n🎯 ${objective}\n❓ ${note || ""}`);
-    } else if (status === "budget-limited") {
-      sendTelegram(config, `⛔ *Budget exceeded*\n🎯 ${objective}\n📝 ${note || ""}`);
-    }
-  }));
+  unsubs.push(
+    pi.events.on("goal:status-change", (data) => {
+      const { status, objective, note } = data as {
+        status: string;
+        objective: string;
+        note?: string;
+      };
+      if (status === "achieved") {
+        sendTelegram(config, `✅ *Goal achieved*\n🎯 ${objective}\n📝 ${note || ""}`);
+      } else if (status === "blocked") {
+        sendTelegram(config, `🚧 *Goal blocked*\n🎯 ${objective}\n❓ ${note || ""}`);
+      } else if (status === "budget-limited") {
+        sendTelegram(config, `⛔ *Budget exceeded*\n🎯 ${objective}\n📝 ${note || ""}`);
+      }
+    }),
+  );
 
   // ── 원격 질문 응답 (question 익스텐션과 pi.events 로 연동) ─────────────
   // question:ask 를 받으면 텔레그램으로 질문을 보내고(객관식=버튼, 자유입력=답장),
   // getUpdates 폴링로 응답을 받아 question:answer 로 돌려준다.
   // 로컬 TUI 가 먼저 답하면 question:resolved 가 와서 정리한다(방식 C: 메시지 편집).
-  interface QOption { value: string; label: string; description?: string }
-  interface QItem { id: string; label: string; prompt: string; options: QOption[]; multiSelect: boolean }
+  interface QOption {
+    value: string;
+    label: string;
+    description?: string;
+  }
+  interface QItem {
+    id: string;
+    label: string;
+    prompt: string;
+    options: QOption[];
+    multiSelect: boolean;
+  }
   interface AskState {
     askId: string;
     short: string; // callback_data 용 짧은 id
@@ -233,7 +255,8 @@ export default function (pi: ExtensionAPI) {
   const navRow = (st: AskState, qIdx: number): InlineButton[] => {
     const row: InlineButton[] = [];
     if (qIdx > 0) row.push({ text: "◀ Prev", callback_data: `p:${st.short}:${qIdx}:0` });
-    if (qIdx < st.questions.length - 1) row.push({ text: "▶ Next", callback_data: `n:${st.short}:${qIdx}:0` });
+    if (qIdx < st.questions.length - 1)
+      row.push({ text: "▶ Next", callback_data: `n:${st.short}:${qIdx}:0` });
     row.push({ text: "✅ Submit all", callback_data: `a:${st.short}:${qIdx}:0` });
     return row;
   };
@@ -359,11 +382,22 @@ export default function (pi: ExtensionAPI) {
     const q = st.questions[qIdx];
     const opt = q?.options[optIdx];
     if (!q || !opt) return;
-    st.answersByIdx.set(qIdx, { id: q.id, value: opt.value, label: opt.label, wasCustom: false, index: optIdx });
+    st.answersByIdx.set(qIdx, {
+      id: q.id,
+      value: opt.value,
+      label: opt.label,
+      wasCustom: false,
+      index: optIdx,
+    });
     if (st.questions.length === 1) {
       st.done = true;
-      if (st.messageId != null) await tgEdit(config, st.messageId, `✅ *${q.prompt}*\n→ ${opt.label}`);
-      pi.events.emit("question:answer", { askId: st.askId, answers: [st.answersByIdx.get(0)!], cancelled: false });
+      if (st.messageId != null)
+        await tgEdit(config, st.messageId, `✅ *${q.prompt}*\n→ ${opt.label}`);
+      pi.events.emit("question:answer", {
+        askId: st.askId,
+        answers: [st.answersByIdx.get(0)!],
+        cancelled: false,
+      });
       return;
     }
     if (qIdx < st.questions.length - 1) await goTo(st, qIdx + 1);
@@ -408,7 +442,11 @@ export default function (pi: ExtensionAPI) {
     if (st.questions.length === 1) {
       st.done = true;
       if (st.messageId != null) await tgEdit(config, st.messageId, `✅ *${q.prompt}*\n→ ${text}`);
-      pi.events.emit("question:answer", { askId: st.askId, answers: [st.answersByIdx.get(0)!], cancelled: false });
+      pi.events.emit("question:answer", {
+        askId: st.askId,
+        answers: [st.answersByIdx.get(0)!],
+        cancelled: false,
+      });
       return;
     }
     if (qIdx < st.questions.length - 1) await goTo(st, qIdx + 1);
@@ -462,7 +500,9 @@ export default function (pi: ExtensionAPI) {
     // 콜백 쿼리 (버튼)
     const cq = u.callback_query as Record<string, unknown> | undefined;
     if (cq) {
-      const from = (cq.message as Record<string, unknown>)?.chat as Record<string, unknown> | undefined;
+      const from = (cq.message as Record<string, unknown>)?.chat as
+        | Record<string, unknown>
+        | undefined;
       const chatId = String(from?.id ?? "");
       const cbId = String(cq.id ?? "");
       const dataStr = String(cq.data ?? "");
@@ -513,7 +553,10 @@ export default function (pi: ExtensionAPI) {
       if (replyId == null) {
         if (pendingAsks().length > 0) {
           // 안내 메시지 + 사용자 원본 텍스트를 잠시 뒤 지워 채팅을 깔끔히 유지.
-          const noticeId = await tgSend(config, "❗ To answer with text, *reply* to the specific question message.");
+          const noticeId = await tgSend(
+            config,
+            "❗ To answer with text, *reply* to the specific question message.",
+          );
           setTimeout(() => {
             if (noticeId != null) void tgDelete(config, noticeId);
             if (msgId != null) void tgDelete(config, msgId);
@@ -527,39 +570,44 @@ export default function (pi: ExtensionAPI) {
   };
 
   // question:ask — 새 질문 세트 수신.
-  unsubs.push(pi.events.on("question:ask", (data) => {
-    const payload = data as { askId?: string; questions?: QItem[] };
-    if (!payload?.askId || !Array.isArray(payload.questions) || payload.questions.length === 0) return;
-    const short = payload.askId.slice(-8);
-    const st: AskState = {
-      askId: payload.askId,
-      short,
-      questions: payload.questions,
-      idx: 0,
-      answersByIdx: new Map(),
-      multiSel: new Map(),
-      customTexts: new Map(),
-      messageId: null,
-      done: false,
-    };
-    asks.set(payload.askId, st);
-    shortToAsk.set(short, payload.askId);
-    void renderQuestion(st);
-  }));
+  unsubs.push(
+    pi.events.on("question:ask", (data) => {
+      const payload = data as { askId?: string; questions?: QItem[] };
+      if (!payload?.askId || !Array.isArray(payload.questions) || payload.questions.length === 0)
+        return;
+      const short = payload.askId.slice(-8);
+      const st: AskState = {
+        askId: payload.askId,
+        short,
+        questions: payload.questions,
+        idx: 0,
+        answersByIdx: new Map(),
+        multiSel: new Map(),
+        customTexts: new Map(),
+        messageId: null,
+        done: false,
+      };
+      asks.set(payload.askId, st);
+      shortToAsk.set(short, payload.askId);
+      void renderQuestion(st);
+    }),
+  );
 
   // question:resolved — 로컬 TUI 가 먼저 답했거나 취소됨. 방식 C 정리.
-  unsubs.push(pi.events.on("question:resolved", (data) => {
-    const payload = data as { askId?: string };
-    const st = payload?.askId ? asks.get(payload.askId) : undefined;
-    if (!st) return;
-    // 우리가 emit 해서 끝난 게 아니라면(= 로컬이 이김) 떠있는 메시지를 정리.
-    if (!st.done && st.messageId != null) {
-      void tgEdit(config, st.messageId, "✅ _Answered in terminal. This question is closed._");
-    }
-    st.done = true;
-    asks.delete(st.askId);
-    shortToAsk.delete(st.short);
-  }));
+  unsubs.push(
+    pi.events.on("question:resolved", (data) => {
+      const payload = data as { askId?: string };
+      const st = payload?.askId ? asks.get(payload.askId) : undefined;
+      if (!st) return;
+      // 우리가 emit 해서 끝난 게 아니라면(= 로컬이 이김) 떠있는 메시지를 정리.
+      if (!st.done && st.messageId != null) {
+        void tgEdit(config, st.messageId, "✅ _Answered in terminal. This question is closed._");
+      }
+      st.done = true;
+      asks.delete(st.askId);
+      shortToAsk.delete(st.short);
+    }),
+  );
 
   // reload/종료 시 구독 해제 (EventBus 가 재사용되므로 리스너 누적 방지).
   pi.on("session_shutdown", () => {

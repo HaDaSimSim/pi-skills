@@ -13,9 +13,11 @@ link dangles.
 | Extension | What it does | Adds |
 |---|---|---|
 | `btw` | One-off "by the way" side question with full conversation context but zero effect on the main session (ports Claude Code's `/btw`). | `/btw <question>` |
+| `file-guards` | Always-on file-safety guards: blocks `write` from clobbering an existing file not read this session, and appends recovery guidance when an `edit` fails to match. | — |
 | `goal` | Autonomous goal loop (Ralph loop, ports Codex CLI's `/goal`) — pins a durable objective and re-injects continuation prompts each turn until done/blocked. | `/goal <objective>` (`pause`/`resume`/`clear`/`status`, `--budget N`, `--no-block`) |
 | `question` | Interactive `questionnaire` tool — single question shows an option list, multiple shows tab-bar navigation with multi-select. | `questionnaire` tool |
 | `session-lock` | Advisory exclusive session lock so a TUI session and the pi-web backend share one writer; non-owners drop to read-only. | `/takeover` |
+| `stats` | Full-screen usage dashboard (ports opencode's `stats`) — per-session and global token/cost aggregation from session jsonl, read-only with zero LLM-context impact. | `/stats` |
 | `subagents` | Background async multi-subagent runner — spawns concurrent child `pi` processes, persists transcripts, injects only final outputs back. | `spawn_subagents`/`list_subagents`/`fetch_subagent_result`/`send_to_subagent` tools, `ctrl+\` viewer |
 | `telegram` | Telegram push notifications on long-task completion, goal status changes, and when user input is requested. | — |
 | `ui-cosmetics` | Footer customization (token counts, auto-compaction marker, stats/model/branch lines) plus a live "Working… 3s" timer and per-turn model+duration meta. | — |
