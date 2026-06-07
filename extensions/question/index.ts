@@ -88,9 +88,9 @@ function errorResult(
 }
 
 export default function questionnaire(pi: ExtensionAPI) {
-  // 자식 subagent 프로세스(`pi -p`, 비대화형)에서는 questionnaire 를 등록하지 않는다.
-  // 응답할 사람이 없어 해당 툴은 쓸모가 없고(hasUI=false 라 즉시 에러), 모델이 그걸 부르려다
-  // 턴을 낭비하거나 헷갈릴 수 있다. subagents 익스텐션이 자식 env 에 PI_SUBAGENT=1 을 박는다.
+  // Don't register the questionnaire in child subagent processes (`pi -p`, non-interactive).
+  // There's no one to answer, so the tool is useless (hasUI=false makes it error immediately), and the model
+  // could waste a turn or get confused trying to call it. The subagents extension sets PI_SUBAGENT=1 in the child env.
   if (process.env.PI_SUBAGENT) return;
 
   pi.registerTool({
@@ -115,9 +115,9 @@ export default function questionnaire(pi: ExtensionAPI) {
         multiSelect: q.multiSelect === true,
       }));
 
-      // pi-gui/pi-web 같은 비-TUI 호스트: ctx.ui.custom(터미널 오버레이)을 못 그린다.
-      // 호스트가 questionnaire 어댑터(ctx.ui.questionnaire)를 제공하면 그걸로 예쁜
-      // 다이얼로그를 띄우되, telegram 같은 원격 응답과도 레이스한다(먼저 온 쪽 승).
+      // Non-TUI hosts like pi-gui/pi-web: can't draw ctx.ui.custom (a terminal overlay).
+      // If the host provides a questionnaire adapter (ctx.ui.questionnaire), use it to show a nice
+      // dialog, but also race it against remote responses like telegram (first one in wins).
       const webUi = ctx.ui as unknown as {
         questionnaire?: (qs: Question[]) => {
           promise: Promise<Answer[] | null>;
@@ -139,21 +139,21 @@ export default function questionnaire(pi: ExtensionAPI) {
           resolveRemote?.();
         };
         const unsub = pi.events.on("question:answer", onRemote);
-        // telegram 등 원격 클라이언트에 질문 전송.
+        // Send the question to remote clients like telegram.
         pi.events.emit("question:ask", { askId: askId2, questions });
 
         let answers: Answer[] | null;
         try {
-          // GUI 응답 vs 원격 응답 레이스. 먼저 온 쪽이 이기고 진 쪽은 정리.
+          // GUI response vs remote response race. The first one in wins and the loser is cleaned up.
           const winner = await Promise.race([
             gui.promise.then((a) => ({ src: "gui" as const, a })),
             remoteWait.then(() => ({ src: "remote" as const, a: undefined })),
           ]);
           if (winner.src === "remote") {
-            gui.cancel(); // GUI 다이얼로그 닫기
+            gui.cancel(); // close the GUI dialog
             answers = cancelledRemote ? null : (remoteAnswers ?? []);
           } else {
-            answers = winner.a; // GUI 결과 (null=취소)
+            answers = winner.a; // GUI result (null = cancelled)
           }
         } finally {
           unsub();
@@ -179,7 +179,7 @@ export default function questionnaire(pi: ExtensionAPI) {
         };
       }
       if (process.env.PI_WEB_HOST) {
-        // 어댑터 없는 비-TUI 호스트: select/input 으로 하나씩 (폴백).
+        // Non-TUI host without an adapter: one at a time via select/input (fallback).
         const answers: Answer[] = [];
         for (const q of questions) {
           if (q.options.length > 0) {
@@ -228,11 +228,11 @@ export default function questionnaire(pi: ExtensionAPI) {
       const isMulti = questions.length > 1;
       const totalTabs = questions.length + 1; // questions + Submit
 
-      // 원격 응답(텔레그램 등) 지원: askId 로 식별하고, pi.events 로 주고받는다.
-      // 로컬 TUI 입력과 원격 입력 중 먼저 온 쪽이 done 을 호출해 이긴다(중복 방지).
+      // Remote response support (telegram, etc.): identify by askId, exchange via pi.events.
+      // Between local TUI input and remote input, whichever arrives first calls done and wins (prevents duplicates).
       const askId = `ask_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
       let settled = false;
-      let finishRemote: (() => void) | undefined; // resolved 신호 + 구독 해제
+      let finishRemote: (() => void) | undefined; // resolved signal + unsubscribe
       let capturedDone: ((r: QuestionnaireResult) => void) | undefined;
 
       const resultPromise = ctx.ui.custom<QuestionnaireResult>((tui, theme, _kb, done) => {
@@ -544,10 +544,10 @@ export default function questionnaire(pi: ExtensionAPI) {
           return lines;
         }
 
-        // Focusable 구현: TUI 가 이 오버레이 컴포넌트에 setFocus 할 때 focused 를
-        // 내부 Editor 로 전파해야 한다. 그래야 Editor 가 CURSOR_MARKER 를 내보내고
-        // TUI 가 하드웨어 커서를 거기에 둬서 한국어 IME 조합창이 올바른 위치에 뜬다.
-        // (전파를 안 하면 editor.focused 가 계속 false → 마커 없음 → IME 위치가 어긋남.)
+        // Focusable implementation: when the TUI calls setFocus on this overlay component, focused
+        // must be propagated to the inner Editor. Only then does the Editor emit CURSOR_MARKER and
+        // the TUI places the hardware cursor there, so the Korean IME composition window appears in the right spot.
+        // (Without propagation, editor.focused stays false → no marker → the IME position is misaligned.)
         let _focused = false;
         return {
           render,
@@ -565,17 +565,17 @@ export default function questionnaire(pi: ExtensionAPI) {
         };
       });
 
-      // ── 원격 응답 배선: question:ask emit, question:answer 구독 ───────────────
-      // telegram 같은 익스텐션이 question:ask 를 받아 원격 입력을 받고,
-      // question:answer 로 답을 돌려주면 그걸로 done 을 호출해 오버레이를 닫는다.
+      // ── Remote response wiring: emit question:ask, subscribe to question:answer ───────────────
+      // An extension like telegram receives question:ask, takes remote input,
+      // and returns the answer via question:answer, which we use to call done and close the overlay.
       const applyRemoteAnswer = (data: unknown) => {
         if (settled) return;
         const payload = data as { askId?: string; answers?: Answer[]; cancelled?: boolean };
         if (!payload || payload.askId !== askId) return;
         settled = true;
         const remoteAnswers = Array.isArray(payload.answers) ? payload.answers : [];
-        // capturedDone 은 factory 에서 동기적으로 설정되었다. 이걸 부르면
-        // 오버레이가 닫히고 resultPromise 가 풀린다.
+        // capturedDone was set synchronously in the factory. Calling it
+        // closes the overlay and resolves resultPromise.
         capturedDone?.({
           questions,
           answers: remoteAnswers,
@@ -587,7 +587,7 @@ export default function questionnaire(pi: ExtensionAPI) {
         unsubscribe();
         pi.events.emit("question:resolved", { askId });
       };
-      // 질문 전체를 원격쪽에 알린다 (telegram 이 받아 버튼/문답으로 전송).
+      // Notify the remote side of the full question (telegram receives it and sends buttons/Q&A).
       pi.events.emit("question:ask", { askId, questions });
 
       let result: QuestionnaireResult;

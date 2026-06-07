@@ -1,26 +1,29 @@
-// pi 용 todo — Claude Code 의 TodoWrite 를 pi 에 이식한 것.
+// todo for pi — a port of Claude Code's TodoWrite to pi.
 //
-// 동작 개념:
-//   에이전트가 멀티스텝 작업을 진행할 때 쓰는 구조화된 작업 목록이다.
-//   모델이 todo_write 로 목록 전체를 교체하면, 그 시점의 진행 상황이
-//   사용자에게 보인다. 사용자가 직접 관리하는 개인 todo 가 아니라,
-//   "지금 무엇을 하고 있고 다음에 뭘 할지" 를 드러내는 에이전트용 추적 도구.
+// Concept:
+//   A structured task list used while the agent works through a multi-step task.
+//   When the model replaces the whole list via todo_write, the progress at that
+//   point is shown to the user. This is not a personal todo managed by the user;
+//   it's a tracking tool for the agent that surfaces "what it's doing now and what
+//   it'll do next".
 //
-// 표시:
-//   - 에이전트가 일하는 동안(turn_start ~ agent_end) "Working… Ns" 줄 바로
-//     아래에 진행 중/남은 항목이 위젯으로 뜬다 (setWidget, aboveEditor).
-//   - /todo 로 언제든 현재 목록을 텍스트로 볼 수 있다.
+// Display:
+//   - While the agent is working (turn_start ~ agent_end), a widget showing the
+//     in-progress/remaining items appears right below the "Working… Ns" line
+//     (setWidget, aboveEditor).
+//   - /todo shows the current list as text at any time.
 //
-// 영속화:
-//   목록은 pi.appendEntry 로 세션에 기록되고 session_start 에서 복원되므로
-//   /reload 나 재시작 후에도 살아있다. 브랜치와 무관한 세션 전역 상태이므로
-//   appendEntry(마지막 기록이 곧 현재 상태)를 쓴다.
+// Persistence:
+//   The list is recorded to the session via pi.appendEntry and restored at
+//   session_start, so it survives /reload and restarts. Since it's session-global
+//   state independent of the branch, we use appendEntry (the last record is the
+//   current state).
 //
-// 이벤트:
-//   목록이 바뀔 때마다 events 버스에 "todo:changed" 를 쏜다. 다른 확장이
-//   (예: telegram) 진행 상황을 구독할 수 있다.
+// Events:
+//   Whenever the list changes, "todo:changed" is emitted on the events bus. Other
+//   extensions (e.g. telegram) can subscribe to the progress.
 //
-// 설치: ~/.pi/agent/extensions/todo/index.ts (make install 이 symlink)
+// Install: ~/.pi/agent/extensions/todo/index.ts (make install symlinks it)
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -29,9 +32,9 @@ import { Type } from "typebox";
 type TodoStatus = "pending" | "in_progress" | "completed";
 
 interface TodoItem {
-  // 할 일의 명령형 설명 (예: "Run the test suite").
+  // Imperative description of the task (e.g. "Run the test suite").
   content: string;
-  // 진행 중일 때 보여줄 현재형 설명 (예: "Running the test suite"). 선택.
+  // Present-continuous description shown while in progress (e.g. "Running the test suite"). Optional.
   activeForm?: string;
   status: TodoStatus;
 }
@@ -40,15 +43,15 @@ const isDone = (t: TodoItem): boolean => t.status === "completed";
 const allDone = (todos: TodoItem[]): boolean => todos.length > 0 && todos.every(isDone);
 const doneCount = (todos: TodoItem[]): number => todos.filter(isDone).length;
 
-// in_progress 중일 땐 activeForm 을 우선 쓰고, 없으면 content.
+// While in_progress, prefer activeForm; otherwise use content.
 const labelOf = (t: TodoItem): string =>
   t.status === "in_progress" && t.activeForm ? t.activeForm : t.content;
 
-// todo_write 의 핵심 동작: 통째 replace + (CC V1 처럼) 전부 completed 면 클리어.
+// Core behavior of todo_write: wholesale replace + (like CC V1) clear if all completed.
 const normalize = (next: TodoItem[]): TodoItem[] =>
   next.length > 0 && next.every(isDone) ? [] : next;
 
-// tool 이 모델에게 돌려줄 요약 텍스트.
+// Summary text the tool returns to the model.
 const summary = (todos: TodoItem[]): string => {
   if (todos.length === 0) return "All todos completed; list cleared.";
   const done = doneCount(todos);
@@ -58,30 +61,32 @@ const summary = (todos: TodoItem[]): string => {
     : `${done}/${todos.length} todos completed`;
 };
 
-// 상세 위젯/목록 표시용 정렬: in_progress → pending → completed.
+// Ordering for detail widget/list display: in_progress → pending → completed.
 const ORDER: Record<TodoStatus, number> = { in_progress: 0, pending: 1, completed: 2 };
 const sortForDisplay = (todos: TodoItem[]): TodoItem[] =>
   [...todos].sort((a, b) => ORDER[a.status] - ORDER[b.status]);
 
-// 세션 저널에 기록할 커스텀 엔트리 타입. session_start 에서 이 타입만 골라
-// 마지막 기록을 현재 목록으로 복원한다. LLM 컨텍스트에는 들어가지 않는다.
+// Custom entry type recorded in the session journal. At session_start we pick out
+// only this type and restore the last record as the current list. It does not enter
+// the LLM context.
 const STATE_ENTRY_TYPE = "todo-list";
 
-// working 중 "Working… Ns" 줄 아래에 다는 위젯 키. 다른 확장의 위젯과
-// 겹치지 않도록 고유 키를 쓴다. setFooter/setWorkingMessage 는 ui-cosmetics
-// 가 소유하므로 건드리지 않는다.
+// Widget key attached below the "Working… Ns" line while working. We use a unique
+// key so it doesn't collide with other extensions' widgets. setFooter/setWorkingMessage
+// are owned by ui-cosmetics, so we don't touch them.
 const WIDGET_KEY = "todo-progress";
 
-// footer status 키. setStatus 는 키별 멀티 오너라 다른 확장과 공존한다.
-// idle/working 무관하게 todo 가 있으면 n/N 카운트를 상시 띄운다.
+// footer status key. setStatus is multi-owner per key, so it coexists with other
+// extensions. Regardless of idle/working, the n/N count is always shown when there are todos.
 const STATUS_KEY = "todo";
 
-// 위젯이 길어지면 pi 가 잘라내므로(MAX_WIDGET_LINES) 표시 줄 수를 제한한다.
+// If the widget gets too long pi truncates it (MAX_WIDGET_LINES), so we limit the number of shown lines.
 const MAX_WIDGET_ITEMS = 8;
 
-// 모델이 마지막으로 todo_write 를 호출한 뒤 이만큼 턴이 지나면 현재
-// 목록을 컨텍스트에 다시 주입한다(CC 의 todo_reminder 방식). compaction 으로
-// todo_write 호출 기록이 잘려 모델이 자신의 todo 를 잊는 걸 막는다.
+// Once this many turns have passed since the model last called todo_write, the
+// current list is re-injected into the context (CC's todo_reminder approach). This
+// prevents the model from forgetting its own todos when compaction truncates the
+// todo_write call history.
 const REMIND_AFTER_TURNS = 3;
 
 const MARK: Record<TodoStatus, string> = {
@@ -92,30 +97,32 @@ const MARK: Record<TodoStatus, string> = {
 
 export default function (pi: ExtensionAPI) {
   let todos: TodoItem[] = [];
-  // 에이전트가 일하는 중인지(turn_start ~ agent_end). 위젯(상세 목록)은
-  // working 중에만 띄우고, footer 의 n/N 카운트는 idle 에도 상시 띄운다.
+  // Whether the agent is currently working (turn_start ~ agent_end). The widget
+  // (detail list) is shown only while working, but the footer's n/N count is always
+  // shown even when idle.
   let working = false;
 
-  // 리마인더용 턴 카운터. turn_start 마다 증가하고, todo_write 호출 시
-  // "마지막으로 목록을 다룬 턴"을 기록해 경과 턴 수를 쟰다.
+  // Turn counter for the reminder. Incremented on each turn_start; on a todo_write
+  // call we record the "turn the list was last handled" to measure elapsed turns.
   let turnCount = 0;
   let lastWriteTurn = 0;
 
-  // 목록 → 위젯 줄 배열. in_progress 와 pending 을 우선 보여주고, 완료 항목은
-  // 뒤로 미뤄 잘릴 때 덜 중요한 것부터 잘리게 한다.
-  // 마커는 ASCII(`[ ] [~] [x]`)라 터미널 무관하게 너비가 균일해 정렬이 맞는다.
+  // List → widget line array. Show in_progress and pending first, and push completed
+  // items to the back so the less important ones get truncated first.
+  // The markers are ASCII (`[ ] [~] [x]`), so their width is uniform regardless of
+  // terminal and the alignment stays correct.
   const widgetLines = (ctx: ExtensionContext): string[] => {
     const theme = ctx.ui.theme;
     const sorted = sortForDisplay(todos);
     const shown = sorted.slice(0, MAX_WIDGET_ITEMS);
 
-    // 헤더: "n/N todos" (들여쓰기 없이, 아래 본문과 구분).
+    // Header: "n/N todos" (no indentation, distinct from the body below).
     const done = doneCount(todos);
     const header = theme.fg("dim", `${done}/${todos.length} todos`);
 
     const items = shown.map((t) => {
       const label = labelOf(t);
-      // 항목은 헤더보다 한 단계 더 들여쓰고, 마커 뒤 공백 1칸.
+      // Items are indented one level deeper than the header, with 1 space after the marker.
       if (t.status === "completed") {
         return `  ${theme.fg("success", MARK.completed)} ${theme.fg("muted", theme.strikethrough(label))}`;
       }
@@ -127,11 +134,11 @@ export default function (pi: ExtensionAPI) {
 
     const hidden = sorted.length - shown.length;
     if (hidden > 0) items.push(theme.fg("muted", `  …and ${hidden} more`));
-    // 맨 위 헤더 + 본문 + 아래 여백 두 줄.
+    // Header at the top + body + two blank lines below.
     return [header, ...items, "", ""];
   };
 
-  // footer 의 n/N 카운트. todo 가 있으면 idle/working 무관하게 상시 표시.
+  // The footer's n/N count. Always shown when there are todos, regardless of idle/working.
   const refreshStatus = (ctx: ExtensionContext) => {
     if (!ctx.hasUI) return;
     if (todos.length === 0) {
@@ -140,13 +147,13 @@ export default function (pi: ExtensionAPI) {
     }
     const done = doneCount(todos);
     const complete = done === todos.length;
-    // n/N 카운트는 완료 여부에 따라 색, "todos" 단어는 항상 dim.
+    // The n/N count is colored based on completion; the word "todos" is always dim.
     const count = ctx.ui.theme.fg(complete ? "success" : "muted", `${done}/${todos.length}`);
     ctx.ui.setStatus(STATUS_KEY, `${count} ${ctx.ui.theme.fg("dim", "todos")}`);
   };
 
-  // working 중이고 미완료 항목이 남아 있으면 상세 위젯을 갱신, 아니면 클리어.
-  // footer 카운트(refreshStatus)도 함께 갱신한다.
+  // If working and there are unfinished items remaining, refresh the detail widget;
+  // otherwise clear it. Also refreshes the footer count (refreshStatus).
   const refresh = (ctx: ExtensionContext) => {
     if (!ctx.hasUI) return;
     refreshStatus(ctx);
@@ -171,7 +178,7 @@ export default function (pi: ExtensionAPI) {
     pi.events.emit("todo:changed", { todos, counts });
   };
 
-  // 현재 목록을 사람이 읽는 텍스트로 (/, 알림용).
+  // Render the current list as human-readable text (for /todo, notifications).
   const renderList = (ctx: ExtensionContext): string => {
     if (todos.length === 0) return "No todos.";
     const lines = todos.map((t) => `${MARK[t.status]} ${labelOf(t)}`);
@@ -216,9 +223,9 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      // 통째 replace + 전부 completed 면 클리어 (logic.normalize).
+      // Wholesale replace + clear if all completed (logic.normalize).
       todos = normalize(params.todos as TodoItem[]);
-      lastWriteTurn = turnCount; // 방금 목록을 주었으므로 리마인더 카운터 리셋.
+      lastWriteTurn = turnCount; // Just provided the list, so reset the reminder counter.
       persist();
       emitChange();
       refresh(ctx);
@@ -239,7 +246,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Read the current todo list with todo_read",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, _ctx) {
-      lastWriteTurn = turnCount; // 명시적으로 읽었으므로 리마인더 카운터 리셋.
+      lastWriteTurn = turnCount; // Read explicitly, so reset the reminder counter.
       if (todos.length === 0) {
         return { content: [{ type: "text", text: "The todo list is empty." }], details: { todos } };
       }
@@ -274,8 +281,8 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // 세션 시작/재진입 시 마지막 todo-list 엔트리로 목록을 복원하고, footer
-  // 카운트를 띄운다(idle 이라도 todo 가 있으면 보인다).
+  // On session start/re-entry, restore the list from the last todo-list entry and
+  // show the footer count (visible whenever there are todos, even when idle).
   pi.on("session_start", async (_event, ctx) => {
     todos = [];
     turnCount = 0;
@@ -289,10 +296,10 @@ export default function (pi: ExtensionAPI) {
     refresh(ctx);
   });
 
-  // 모델이 한동안 todo_write/read 를 안 썼고 미완료 항목이 남아 있으면,
-  // 현재 목록을 ephemeral user 메시지로 이번 턴 컨텍스트에만 주입한다.
-  // event.messages 에 push 한 것은 세션 저널에 남지 않고, 매 호출마다 다시
-  // 계산되므로 컨텍스트에 누적되지 않는다.
+  // If the model hasn't used todo_write/read for a while and there are unfinished
+  // items remaining, inject the current list as an ephemeral user message into this
+  // turn's context only. What's pushed to event.messages doesn't stay in the session
+  // journal and is recomputed on each call, so it doesn't accumulate in the context.
   pi.on("context", (event) => {
     if (todos.length === 0 || allDone(todos)) return;
     if (turnCount - lastWriteTurn < REMIND_AFTER_TURNS) return;
@@ -310,15 +317,15 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
-  // 에이전트가 일을 시작하면 상세 위젯을 켠고, 리마인더용 턴 카운터를 올린다.
+  // When the agent starts working, turn on the detail widget and bump the reminder turn counter.
   pi.on("turn_start", (event, ctx) => {
     if (event.turnIndex === 0) working = true;
     turnCount++;
     refresh(ctx);
   });
 
-  // 턴이 끝나면 idle 로 전환한다. 상세 위젯은 내리지만 footer n/N 카운트는
-  // 그대로 남는다(refresh 안에서 처리).
+  // When the turn ends, switch to idle. The detail widget is taken down, but the
+  // footer n/N count stays (handled inside refresh).
   pi.on("agent_end", (_event, ctx) => {
     working = false;
     refresh(ctx);

@@ -1,7 +1,7 @@
-// stats/format — 숫자 포매팅 + 박스/막대그래프 렌더 헬퍼.
+// stats/format — number formatting + box/bar-chart render helpers.
 //
-// pi-tui 의 폭 계산과 충돌하지 않도록, 여기서 만드는 줄은 모두 ASCII/박스문자만
-// 쓰고 ANSI 색은 theme.fg 로만 입힌다. 호출부에서 truncateToWidth 로 한 번 더 clamp.
+// To avoid clashing with pi-tui's width calculation, every line built here uses only
+// ASCII/box-drawing characters and applies ANSI color via theme.fg only. The caller clamps once more with truncateToWidth.
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
@@ -14,12 +14,12 @@ export function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
-// 정수에 천단위 콤마.
+// Integer with thousands separators.
 export function formatInt(n: number): string {
   return Math.round(n).toLocaleString("en-US");
 }
 
-// 비용. 큰 값은 콤마, 작은 값은 소수 더 보여줌.
+// Cost. Large values get commas, small values show more decimals.
 export function formatCost(n: number): string {
   if (n >= 100)
     return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -28,7 +28,7 @@ export function formatCost(n: number): string {
   return `$${n.toFixed(4)}`;
 }
 
-// 밀리초 → "3d", "5h", "12m", "<1m" 같은 짧은 기간.
+// milliseconds → short duration like "3d", "5h", "12m", "<1m".
 export function formatDuration(ms: number): string {
   if (ms <= 0) return "0m";
   const m = Math.floor(ms / 60000);
@@ -40,22 +40,22 @@ export function formatDuration(ms: number): string {
   return `${d}d ${h % 24}h`;
 }
 
-// 박스 한 섹션. title 헤더 + key/value 줄들을 │ … │ 박스로 감싼다.
-// width 는 박스 바깥 폭(테두리 포함).
+// One box section. Wraps the title header + key/value lines in a │ … │ box.
+// width is the outer box width (including borders).
 export interface KV {
   label: string;
   value: string;
-  accent?: boolean; // value 를 accent 색으로
+  accent?: boolean; // render value in the accent color
 }
 
 export function renderBox(theme: Theme, width: number, title: string, rows: KV[]): string[] {
-  const inner = Math.max(10, width - 2); // │ 안쪽 폭
+  const inner = Math.max(10, width - 2); // inner width of │
   const out: string[] = [];
   const top = `┌${"─".repeat(inner)}┐`;
   const mid = `├${"─".repeat(inner)}┤`;
   const bot = `└${"─".repeat(inner)}┘`;
   out.push(theme.fg("dim", top));
-  // 가운데 정렬 타이틀
+  // center-aligned title
   out.push(
     theme.fg("dim", "│") +
       centerStyled(theme, title.toUpperCase(), inner, "accent", true) +
@@ -65,7 +65,7 @@ export function renderBox(theme: Theme, width: number, title: string, rows: KV[]
   for (const r of rows) {
     const labelCol = r.label;
     const valueCol = r.value;
-    const pad = inner - visibleLen(labelCol) - visibleLen(valueCol) - 2; // 양옆 1칸씩
+    const pad = inner - visibleLen(labelCol) - visibleLen(valueCol) - 2; // 1 space on each side
     const padded = pad > 0 ? " ".repeat(pad) : " ";
     const line =
       " " +
@@ -79,8 +79,8 @@ export function renderBox(theme: Theme, width: number, title: string, rows: KV[]
   return out;
 }
 
-// 막대그래프 한 줄: label ███████ count (pct%)
-// maxBar 칸을 최댓값 기준으로 비례 배분.
+// One bar-chart line: label ███████ count (pct%)
+// Distributes maxBar cells proportionally to the maximum value.
 export interface BarRow {
   label: string;
   count: number;
@@ -110,9 +110,9 @@ export function renderBars(
   const max = rows.reduce((a, r) => Math.max(a, r.count), 0) || 1;
   const shown = rows.slice(0, maxRows);
 
-  // 컬럼 폭 계산: label(고정) + bar + " count (pct%)"
+  // compute column widths: label (fixed) + bar + " count (pct%)"
   const labelW = Math.min(18, Math.max(8, ...shown.map((r) => r.label.length)));
-  // 우측 숫자 영역 폭은 가장 긴 "count (pct%)" 기준.
+  // the right-side number area width is based on the longest "count (pct%)".
   const numStrs = shown.map((r) => `${formatInt(r.count)} (${pct(r.count, total)})`);
   const numW = Math.max(...numStrs.map((s) => s.length), 6);
   const barW = Math.max(6, inner - 1 - labelW - 1 - 1 - numW - 1);
@@ -144,8 +144,8 @@ export function renderBars(
   return out;
 }
 
-// 시간대(24) 히트맵: 각 시간을 농도 블록 한 칸으로 표현. 아래에 0/6/12/18/23 눈금.
-// counts 는 [0..23] 메시지 수.
+// Hour-of-day (24) heatmap: each hour shown as one density block. Ticks 0/6/12/18/23 below.
+// counts is [0..23] message counts.
 export function renderHourHeatmap(
   theme: Theme,
   width: number,
@@ -175,13 +175,13 @@ export function renderHourHeatmap(
   const bar = ` ${theme.fg("accent", cells)}`;
   out.push(theme.fg("dim", "│") + clampStyled(bar, inner) + theme.fg("dim", "│"));
 
-  // 눈금 줄: 0 / 6 / 12 / 18 / 23 위치에 대략 맞춤.
+  // ruler line: roughly aligned to the 0 / 6 / 12 / 18 / 23 positions.
   const ruler = buildHourRuler();
   out.push(
     theme.fg("dim", "│") + clampStyled(` ${theme.fg("dim", ruler)}`, inner) + theme.fg("dim", "│"),
   );
 
-  // 피크 시간 요약.
+  // peak hour summary.
   const peakLine = ` ${theme.fg("muted", "peak")} ${theme.fg("text", `${pad2(peakHour)}:00`)} ${theme.fg("dim", `(${formatInt(counts[peakHour] || 0)} msgs)`)}`;
   out.push(theme.fg("dim", "│") + clampStyled(peakLine, inner) + theme.fg("dim", "│"));
 
@@ -189,7 +189,7 @@ export function renderHourHeatmap(
   return out;
 }
 
-// 24칸 블록 아래 눈금 "0   6   12  18 23" 근사치 한 줄(24칸 정렬).
+// Approximate one-line ruler "0   6   12  18 23" below the 24 blocks (aligned to 24 cells).
 function buildHourRuler(): string {
   const slots = new Array(24).fill(" ");
   const marks: [number, string][] = [
@@ -212,7 +212,7 @@ function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-// ─── 작은 헬퍼들 ───────────────────────────────────────────────────────────
+// ─── Small helpers ────────────────────────────────────────────────
 
 function pct(n: number, total: number): string {
   const p = (n / total) * 100;
@@ -236,15 +236,15 @@ function padLeft(s: string, w: number): string {
   return len >= w ? s : " ".repeat(w - len) + s;
 }
 
-// ANSI 없는 가정의 길이(여기 들어오는 건 색 입히기 전 평문).
+// Length assuming no ANSI (what comes in here is plain text before coloring).
 function visibleLen(s: string): number {
-  // 결합 이모지/와이드 문자는 드물어 대략 길이로 처리. 호출부 truncateToWidth 가 최종 방어.
+  // Combining emoji / wide chars are rare, so approximate by length. The caller's truncateToWidth is the final defense.
   return [...s].length;
 }
 
-// 색 입힌 줄을 inner 폭에 맞게 우측 공백 패딩(평문 길이 기준 근사).
-// 이미 색이 들어간 문자열이라 정확 폭 계산은 호출부 truncateToWidth 에 맡기고,
-// 여기선 부족분만 공백으로 채워 박스 우측 테두리가 정렬되게 한다.
+// Right-pads a colored line to the inner width (approximated by plain-text length).
+// Since the string is already colored, exact width calculation is left to the caller's truncateToWidth;
+// here we just fill the shortfall with spaces so the box's right border stays aligned.
 function clampStyled(styled: string, inner: number): string {
   const plainLen = stripAnsiLen(styled);
   if (plainLen >= inner) return styled;
@@ -266,7 +266,7 @@ function centerStyled(
   return " ".repeat(leftPad) + styled + " ".repeat(rightPad);
 }
 
-// ANSI 이스케이프를 뺀 가시 길이.
+// Visible length excluding ANSI escapes.
 function stripAnsiLen(s: string): number {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR escape sequences requires the ESC control char
   const plain = s.replace(/\u001b\[[0-9;]*m/g, "");

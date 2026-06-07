@@ -1,21 +1,21 @@
-// stats/aggregate — 세션 jsonl 을 직접 스트리밍으로 읽어 사용량을 집계한다.
+// stats/aggregate — reads session jsonl directly via streaming to aggregate usage.
 //
-// 왜 raw jsonl 직접 파싱인가:
-//   - SessionManager.listAll() 이 주는 SessionInfo 엔 토큰/비용이 없다(메타데이터뿐).
-//     어차피 각 파일의 엔트리를 봐야 하므로, 트리 인덱스를 만드는 getEntries() 보다
-//     단순 라인 스캔이 가장 빠르고 메모리도 아낀다(11MB 짜리 파일도 스트리밍이면 OK).
-//   - 분기(branch)된 세션은 활성 경로 밖 엔트리도 파일에 남는다. "실제로 발생한
-//     사용량/비용" 관점에선 모든 assistant 메시지를 더하는 게 맞다(과금은 전부 일어났다).
+// Why parse raw jsonl directly:
+//   - The SessionInfo returned by SessionManager.listAll() has no tokens/cost (metadata only).
+//     Since we have to look at each file's entries anyway, a simple line scan is faster
+//     and uses less memory than getEntries() which builds a tree index (an 11MB file is fine when streamed).
+//   - A branched session leaves entries outside the active path in the file too. From the
+//     "usage/cost that actually happened" perspective, summing all assistant messages is correct (all of it was billed).
 //
-// 집계 단위:
-//   - 세션별(파일별) / 글로벌(전체 합) / 일자별(UTC yyyy-mm-dd) / 모델별 / 툴별.
-//   - 툴 카운트는 assistant content 의 toolCall 블록 name 으로 센다("호출된 툴" 기준).
+// Aggregation units:
+//   - Per session (per file) / global (grand total) / per day (UTC yyyy-mm-dd) / per model / per tool.
+//   - Tool counts are tallied by the name of toolCall blocks in assistant content ("tools invoked" basis).
 
 import * as fs from "node:fs";
 import * as readline from "node:readline";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
-// ─── 타입 ────────────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────
 
 export interface TokenTotals {
   input: number;
@@ -26,23 +26,23 @@ export interface TokenTotals {
 }
 
 export interface SessionStats {
-  file: string; // 세션 jsonl 절대경로
-  id: string; // 세션 UUID (헤더)
-  cwd: string; // 작업 디렉터리
-  name?: string; // /name 으로 지정한 표시 이름
-  firstUserText: string; // 첫 user 메시지(이름 없을 때 라벨용)
-  startedAt: number; // 첫 엔트리 timestamp (ms)
-  endedAt: number; // 마지막 엔트리 timestamp (ms)
+  file: string; // absolute path to the session jsonl
+  id: string; // session UUID (header)
+  cwd: string; // working directory
+  name?: string; // display name set via /name
+  firstUserText: string; // first user message (used as label when there is no name)
+  startedAt: number; // first entry timestamp (ms)
+  endedAt: number; // last entry timestamp (ms)
   userMessages: number;
   assistantMessages: number;
   toolResults: number;
   tokens: TokenTotals;
   tools: Map<string, number>; // toolName -> count
   models: Map<string, number>; // model -> assistant message count
-  days: Set<string>; // 활동한 날짜(로컬 yyyy-mm-dd)
+  days: Set<string>; // active dates (local yyyy-mm-dd)
   costByDay: Map<string, number>; // yyyy-mm-dd -> cost
-  byHour: number[]; // [0..23] 시간대별 메시지 수(로컬)
-  byWeekday: number[]; // [0..6] 요일별 메시지 수(일=0, 로컬)
+  byHour: number[]; // [0..23] message count per hour (local)
+  byWeekday: number[]; // [0..6] message count per weekday (Sun=0, local)
 }
 
 export interface AggregateStats {
@@ -55,7 +55,7 @@ export interface AggregateStats {
   tokens: TokenTotals;
   tools: Map<string, number>;
   models: Map<string, number>;
-  days: Set<string>; // 전체 활동 날짜(로컬)
+  days: Set<string>; // all active dates (local)
   costByDay: Map<string, number>; // yyyy-mm-dd -> cost
   byHour: number[]; // [0..23]
   byWeekday: number[]; // [0..6]
@@ -63,7 +63,7 @@ export interface AggregateStats {
   lastActivity: number; // ms
 }
 
-// ─── 헬퍼 ────────────────────────────────────────────────────────────────
+// ─── Helpers ───────────────────────────────────────────────────────────────
 
 function emptyTokens(): TokenTotals {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
@@ -82,9 +82,9 @@ function bump(map: Map<string, number>, key: string, by = 1): void {
   map.set(key, (map.get(key) || 0) + by);
 }
 
-// 디스크의 모든 세션 jsonl 경로를 받는다. SessionManager.listAll() 이 모든
-// 프로젝트의 모든 세션을 찾아주고 PI_CODING_AGENT_DIR 도 알아서 처리한다.
-// SessionInfo 엔 토큰/비용이 없으므로 경로(path)만 귫어 쓴다.
+// Gets the paths of all session jsonl files on disk. SessionManager.listAll() finds
+// every session across all projects and handles PI_CODING_AGENT_DIR on its own.
+// SessionInfo has no tokens/cost, so we only pull out the path.
 async function listAllSessionFiles(): Promise<string[]> {
   try {
     const infos = await SessionManager.listAll();
@@ -104,7 +104,7 @@ function firstLineText(content: string | any[]): string {
   return "";
 }
 
-// ms → 로컬 yyyy-mm-dd (UTC 아닌 사용자 타임존 기준으로 날짜 버킷팅).
+// ms → local yyyy-mm-dd (bucket dates by the user's timezone, not UTC).
 function localDayKey(ms: number): string {
   const d = new Date(ms);
   const y = d.getFullYear();
@@ -113,7 +113,7 @@ function localDayKey(ms: number): string {
   return `${y}-${mo}-${da}`;
 }
 
-// 한 세션 파일을 스트리밍으로 읽어 SessionStats 로 집계.
+// Streams a single session file and aggregates it into a SessionStats.
 async function aggregateFile(file: string): Promise<SessionStats | undefined> {
   const stats: SessionStats = {
     file,
@@ -150,23 +150,23 @@ async function aggregateFile(file: string): Promise<SessionStats | undefined> {
     try {
       e = JSON.parse(trimmed);
     } catch {
-      continue; // 깨진 라인은 건너뛴다
+      continue; // skip broken lines
     }
     sawAny = true;
 
-    // 헤더
+    // header
     if (e.type === "session") {
       stats.id = e.id || stats.id;
       stats.cwd = e.cwd || stats.cwd;
       continue;
     }
 
-    // 표시 이름
+    // display name
     if (e.type === "session_info" && typeof e.name === "string") {
       stats.name = e.name;
     }
 
-    // 날짜/시간 범위 (엔트리 레벨 ISO timestamp 사용, 로컬 날짜로 버킷팅)
+    // date/time range (uses the entry-level ISO timestamp, bucketed by local date)
     const tsIso: string | undefined = typeof e.timestamp === "string" ? e.timestamp : undefined;
     let tsMs = Number.NaN;
     if (tsIso) {
@@ -212,7 +212,7 @@ async function aggregateFile(file: string): Promise<SessionStats | undefined> {
   return stats;
 }
 
-// 여러 SessionStats 를 글로벌로 합친다.
+// Combines multiple SessionStats into a global aggregate.
 function combine(sessions: SessionStats[]): AggregateStats {
   const agg: AggregateStats = {
     sessions,
@@ -255,11 +255,11 @@ function combine(sessions: SessionStats[]): AggregateStats {
   return agg;
 }
 
-// 일자별 비용은 메인 패스(aggregateFile)에서 엔트리별 cost 를 day 에 누적해 둔다.
+// Per-day cost is accumulated into each day from per-entry cost during the main pass (aggregateFile).
 
-// ─── 공개 API ─────────────────────────────────────────────────────────────
+// ─── Public API ────────────────────────────────────────────────────────────
 
-// 글로벌: 모든 프로젝트의 모든 세션을 집계(SessionManager.listAll()).
+// Global: aggregate every session across all projects (SessionManager.listAll()).
 export async function aggregateGlobal(
   onProgress?: (loaded: number, total: number) => void,
 ): Promise<AggregateStats> {
@@ -272,40 +272,40 @@ export async function aggregateGlobal(
     onProgress?.(loaded, files.length);
     if (s) sessions.push(s);
   }
-  // 최근 활동 순 정렬
+  // sort by most recent activity
   sessions.sort((a, b) => b.endedAt - a.endedAt);
   return combine(sessions);
 }
 
-// 단일 세션 파일만 집계 (현재 세션 탭용).
+// Aggregate a single session file only (for the current-session tab).
 export async function aggregateSession(file: string): Promise<AggregateStats> {
   const s = await aggregateFile(file);
   return combine(s ? [s] : []);
 }
 
-// 이미 집계된 SessionStats 하나를 대시보드용 AggregateStats 로 래핑(글로벌 탭의 세션 드릴다운).
+// Wraps a single already-aggregated SessionStats into a dashboard AggregateStats (session drill-down on the global tab).
 export function statsFromSession(s: SessionStats): AggregateStats {
   return combine([s]);
 }
 
-// 활동 streak 계산 결과.
+// Result of the activity streak calculation.
 export interface StreakInfo {
-  current: number; // 오늘(또는 어제)까지 이어지는 연속 활동일
-  longest: number; // 역대 최장 연속 활동일
+  current: number; // consecutive active days running up to today (or yesterday)
+  longest: number; // longest run of consecutive active days ever
 }
 
-// days(로컬 yyyy-mm-dd) 집합에서 현재/최장 streak 를 계산.
-// current 는 오늘 또는 어제에서 시작해 연속된 날을 센다(오늘 아직 활동 전이어도 유지).
+// Computes the current/longest streak from a set of days (local yyyy-mm-dd).
+// current counts consecutive days starting from today or yesterday (kept even if there's been no activity today yet).
 export function computeStreak(days: Set<string>): StreakInfo {
   if (days.size === 0) return { current: 0, longest: 0 };
-  // yyyy-mm-dd 를 � 수로 변환(로컬 자정 기준) 해 인접일 비교.
+  // convert yyyy-mm-dd to a day number (based on local midnight) to compare adjacent days.
   const toNum = (key: string): number => {
     const [y, m, d] = key.split("-").map(Number);
     return Math.floor(new Date(y, m - 1, d).getTime() / 86400000);
   };
   const nums = [...days].map(toNum).sort((a, b) => a - b);
 
-  // 최장 streak
+  // longest streak
   let longest = 1;
   let run = 1;
   for (let i = 1; i < nums.length; i++) {
@@ -314,7 +314,7 @@ export function computeStreak(days: Set<string>): StreakInfo {
     if (run > longest) longest = run;
   }
 
-  // 현재 streak: 오늘부터 거꾸로 연속된 날 세기. 오늘 활동이 없으면 어제부터.
+  // current streak: count consecutive days backward from today. If there's no activity today, start from yesterday.
   const set = new Set(nums);
   const now = new Date();
   const today = Math.floor(

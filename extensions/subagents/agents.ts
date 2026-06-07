@@ -1,8 +1,7 @@
-// Agent 정의 discovery — ~/.pi/agent/agents/*.md (user) 및 .pi/agents/*.md (project).
+// Agent definition discovery — ~/.pi/agent/agents/*.md (user) and .pi/agents/*.md (project).
 //
-// 기존 pi subagent 예제의 discovery 로직을 거의 그대로 가져왔다. 각 agent 는
-// YAML frontmatter(name, description, tools, model) + 본문(system prompt) 형태의
-// 마크다운 파일이다.
+// Taken almost verbatim from the discovery logic in the existing pi subagent example. Each agent
+// is a markdown file in the form of YAML frontmatter (name, description, tools, model) + body (system prompt).
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -92,8 +91,8 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
   const userDir = path.join(getAgentDir(), "agents");
   const projectAgentsDir = findNearestProjectAgentsDir(cwd);
-  // 이 extension 이 번들로 함꾸하는 agents/ (자기 디렉터리 옆). 항상 최저 우선순위로
-  // 로드되어, 동명의 user/project agent 가 있으면 그쪽이 덮어쓴다.
+  // The agents/ bundled with this extension (next to its own directory). Always loaded at the
+  // lowest priority, so a user/project agent with the same name overrides it.
   const bundledDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "agents");
 
   const bundledAgents = loadAgentsFromDir(bundledDir, "bundled");
@@ -102,7 +101,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
     scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
 
   const agentMap = new Map<string, AgentConfig>();
-  // 번들 → user → project 순으로 덮어 우선순위 적용.
+  // Apply override priority in the order bundled → user → project.
   for (const agent of bundledAgents) agentMap.set(agent.name, agent);
   if (scope === "both") {
     for (const agent of userAgents) agentMap.set(agent.name, agent);

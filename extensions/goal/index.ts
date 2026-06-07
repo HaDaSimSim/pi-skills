@@ -1,22 +1,22 @@
-// pi 용 /goal — Codex CLI 의 /goal (자율 목표 루프) 을 pi 에 이식한 것.
+// /goal for pi — a port of Codex CLI's /goal (autonomous goal loop) to pi.
 //
-// 동작 개념:
-//   보통 에이전트는 사용자 프롬프트 한 건(agent_start ~ agent_end)이 끝나면
-//   멈춘다. /goal 은 "하나의 지속 목표" 를 세션에 고정해두고, 그 목표가
-//   끝났다고 판단될 때까지 매 agent_end 마다 continuation 프롬프트를 다시
-//   투입해 스스로 턴을 이어가게 만든다 (이른바 Ralph loop).
+// Concept:
+//   Normally an agent stops once a single user prompt (agent_start ~ agent_end)
+//   completes. /goal pins "one durable goal" to the session and, until that goal
+//   is judged complete, re-injects a continuation prompt at every agent_end so
+//   the agent keeps taking turns on its own (the so-called Ralph loop).
 //
-// 루프 엔진:
-//   - /goal <objective> 로 목표를 세우면 첫 프롬프트를 sendUserMessage 로 투입.
-//   - 그 턴이 끝나면(agent_end) 목표가 아직 "pursuing" 이면 continuation 을 재투입.
-//   - 모델이 goal_done / goal_blocked 툴을 부르거나, 사용자가 pause/clear 하거나,
-//     토큰 예산·최대 반복 횟수에 도달하면 루프가 멈춘다.
+// Loop engine:
+//   - /goal <objective> sets the goal and injects the first prompt via sendUserMessage.
+//   - When that turn ends (agent_end), if the goal is still "pursuing", re-inject the continuation.
+//   - The loop stops when the model calls the goal_done / goal_blocked tool, the user pauses/clears,
+//     or the token budget / max iteration count is reached.
 //
-// 영속화:
-//   목표 상태는 pi.appendEntry 로 세션에 기록되고 session_start 에서 복원되므로
-//   /reload 나 재시작 후에도 목표가 살아있다.
+// Persistence:
+//   Goal state is recorded to the session via pi.appendEntry and restored at session_start,
+//   so the goal survives a /reload or restart.
 //
-// 설치: ~/.pi/agent/extensions/goal/index.ts (make install 이 symlink)
+// Install: ~/.pi/agent/extensions/goal/index.ts (symlinked by make install)
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -27,40 +27,40 @@ type GoalStatus = "pursuing" | "paused" | "achieved" | "blocked" | "budget-limit
 interface GoalState {
   objective: string;
   status: GoalStatus;
-  iteration: number; // continuation 을 몇 번 재투입했는지 (표시용 카운터)
-  tokenBudget?: number; // 누적 토큰(input+output) 상한. 넘으면 멈춤 (선택)
-  ignoreBlocked?: boolean; // true 면 goal_blocked 를 무시하고 계속 돈다 (--no-block)
-  note?: string; // 마지막 달성/차단 사유
+  iteration: number; // how many times the continuation has been re-injected (display counter)
+  tokenBudget?: number; // cap on cumulative tokens (input+output). Stops when exceeded (optional)
+  ignoreBlocked?: boolean; // if true, ignore goal_blocked and keep running (--no-block)
+  note?: string; // last achievement/block reason
   createdAt: number;
 }
 
-// Ralph loop: 반복 횟수 제한은 두지 않는다. 멈춤은 모델의 goal_done/
-// goal_blocked, 사용자의 pause/clear, 그리고 (설정 시) 토큰 예산뿐이다.
+// Ralph loop: no cap on iteration count. The only stops are the model's goal_done/
+// goal_blocked, the user's pause/clear, and (if configured) the token budget.
 const STATE_ENTRY_TYPE = "goal-state";
 
 export default function (pi: ExtensionAPI) {
-  // 자식 subagent 프로세스(`pi -p`, 비대화형)에서는 goal 을 등록하지 않는다.
-  // /goal 은 사람이 걸는 자율 루프(Ralph loop)라 단발 -p 자식엔 불필요하고,
-  // continuation 재투입·goal 툴이 자식에 엮히면 멈추지 않을 위험도 있다.
-  // subagents 익스텐션이 자식 env 에 PI_SUBAGENT=1 을 박는다.
+  // Don't register the goal in child subagent processes (`pi -p`, non-interactive).
+  // /goal is an autonomous loop (Ralph loop) a human starts, so it's unnecessary for a one-shot -p child,
+  // and continuation re-injection / goal tools getting entangled in a child risks it never stopping.
+  // The subagents extension stamps PI_SUBAGENT=1 into the child env.
   if (process.env.PI_SUBAGENT) return;
 
   let goal: GoalState | null = null;
 
-  // ── subagents 연동 ────────────────────────────────────────────────────
-  // subagents 익스텐션이 "subagents:running" 으로 진행 중 개수를 브로드캐스트한다.
-  // 백그라운드 subagent 가 도는 동안에는 agent_end 에서 continuation 재투입을
-  // 보류한다(아래 agent_end 핸들러). 그러면 메인이 결과를 안 기다리고 계속
-  // 폭주하는 걸 막는다. 마지막 subagent 가 끝나면 subagents 가 보내는
-  // "[subagent ... finished]" 메시지가 새 턴을 만들고, 그 턴의 agent_end 에서
-  // (이제 running==0) 루프가 자연스럽게 재개된다. 따라서 여긴 카운터만 유지하면
-  // 되고, 별도 resume kick 은 두지 않는다(이중 투입 방지).
+  // ── subagents integration ──────────────────────────────────
+  // The subagents extension broadcasts the in-progress count via "subagents:running".
+  // While background subagents are running, the continuation re-injection at agent_end is
+  // held off (see the agent_end handler below). That keeps the main agent from running away
+  // without waiting for results. When the last subagent finishes, the
+  // "[subagent ... finished]" message subagents sends creates a new turn, and at that turn's
+  // agent_end (now running==0) the loop naturally resumes. So here we only need to keep the
+  // counter, with no separate resume kick (avoids double injection).
   let runningSubagents = 0;
   pi.events.on("subagents:running", (payload: { running?: number }) => {
     runningSubagents = typeof payload?.running === "number" ? payload.running : 0;
   });
 
-  // ── 상태 표시 / 영속화 ────────────────────────────────────────────────
+  // ── Status display / persistence ───────────────────────────────
 
   const statusEmoji: Record<GoalStatus, string> = {
     pursuing: "🎯",
@@ -70,16 +70,16 @@ export default function (pi: ExtensionAPI) {
     "budget-limited": "⛔",
   };
 
-  // 상태가 바뀔 때마다 세션에 기록(브랜치와 무관한 세션 전역 상태이므로 appendEntry).
+  // Record to the session whenever state changes (session-global state independent of branches, so appendEntry).
   const persist = () => {
     if (goal) pi.appendEntry(STATE_ENTRY_TYPE, goal as unknown as Record<string, unknown>);
   };
 
-  // goal 도구 동적 노출: goal 이 추적 가능한 상태(pursuing/paused)일 때만
-  // goal_done/goal_blocked 를 활성 도구 목록에 둔다. goal 이 없거나 종료되면
-  // 이 extension 은 도구도 프롬프트도 아무 흔적을 남기지 않는다.
-  // (setActiveTools 는 전체 활성 목록을 받으므로, 현재 목록을 읽어
-  //  내 두 도구만 추가/제거해 다른 extension 도구는 건드리지 않는다.)
+  // Dynamic goal-tool exposure: only when the goal is in a trackable state (pursuing/paused)
+  // are goal_done/goal_blocked kept in the active tool list. When there is no goal or it has ended,
+  // this extension leaves no trace — neither tools nor prompts.
+  // (setActiveTools takes the full active list, so we read the current list and only
+  //  add/remove my two tools, leaving other extensions' tools untouched.)
   const GOAL_TOOLS = ["goal_done", "goal_blocked"];
   const syncGoalTools = (present: boolean) => {
     try {
@@ -90,15 +90,15 @@ export default function (pi: ExtensionAPI) {
       }
       pi.setActiveTools([...active]);
     } catch {
-      // 런타임 초기화 전(load 단계)에는 호출 불가 — 무시.
+      // Can't be called before runtime init (during the load phase) — ignore.
     }
   };
   const goalIsLive = () => !!goal && (goal.status === "pursuing" || goal.status === "paused");
 
   const setStatus = (ctx: ExtensionContext) => {
-    // 도구 동기화는 UI 유무와 무관 (print 모드에서도 모델이 볼 수 있으므로
-    // 항상 먼저 맞춰둔다). 모든 상태 전이가 setStatus 를 거치므로
-    // 여기 한 곳에서 도구 노출을 일괄 관리한다.
+    // Tool sync is independent of whether there's a UI (the model can see them even in
+    // print mode, so always sync first). Every state transition goes through setStatus, so
+    // tool exposure is managed centrally here in one place.
     syncGoalTools(goalIsLive());
     if (!ctx.hasUI) return;
     if (!goal) {
@@ -110,7 +110,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus("goal", ctx.ui.theme.fg("dim", `${e} goal ${goal.status}${counter}`));
   };
 
-  // ── 누적 토큰(예산 체크용) ────────────────────────────────────────────
+  // ── Cumulative tokens (for budget checks) ──────────────────────
 
   const cumulativeTokens = (ctx: ExtensionContext): number => {
     let total = 0;
@@ -123,14 +123,14 @@ export default function (pi: ExtensionAPI) {
     return total;
   };
 
-  // ── 프롬프트 빌더 ─────────────────────────────────────────────────────
+  // ── Prompt builder ────────────────────────────────────
 
   const loopInstructions =
     "When the goal is fully achieved and you have verified it, call the goal_done tool with a short evidence summary. " +
     "If you are blocked and cannot make progress without the user, call the goal_blocked tool with the reason. " +
     "Otherwise, take the next concrete step now and keep going without waiting for further input.";
 
-  // --no-block 모드: goal_blocked 가 무력화됨을 모델에게 명확히 알린다.
+  // --no-block mode: clearly tell the model that goal_blocked is disabled.
   const loopInstructionsNoBlock =
     "When the goal is fully achieved and you have verified it, call the goal_done tool with a short evidence summary. " +
     "You may NOT stop for being blocked: the goal_blocked tool is disabled for this run and will be ignored. " +
@@ -156,9 +156,9 @@ export default function (pi: ExtensionAPI) {
     );
   };
 
-  // ── 루프 재투입 ───────────────────────────────────────────────────────
+  // ── Loop re-injection ───────────────────────────────────
 
-  // agent_end 직후 idle 로 전환되는 타이밍을 안전하게 잡기 위해 한 틱 미룬다.
+  // Defer by one tick to safely catch the timing where it transitions to idle right after agent_end.
   const kick = (ctx: ExtensionContext, kind: "start" | "continue") => {
     setTimeout(() => {
       if (goal?.status !== "pursuing") return;
@@ -166,19 +166,19 @@ export default function (pi: ExtensionAPI) {
       if (ctx.isIdle()) {
         pi.sendUserMessage(prompt);
       } else {
-        // 아직 스트리밍 중이면 현재 턴이 끝난 뒤 이어붙인다.
+        // If still streaming, append after the current turn ends.
         pi.sendUserMessage(prompt, { deliverAs: "followUp" });
       }
     }, 0);
   };
 
-  // 매 프롬프트가 끝날 때마다: 목표 추적 중이면 다음 step 을 재투입.
+  // At the end of every prompt: if a goal is being tracked, re-inject the next step.
   pi.on("agent_end", async (event, ctx) => {
     if (goal?.status !== "pursuing") return;
 
-    // 사용자가 Esc 로 abort 했으면 루프를 멈춘다. abort 는 "그만" 신호이므로
-    // 자동 재투입하지 않고 paused 로 전환해 사용자가 직접 resume 하게 둔다.
-    // 마지막 assistant 메시지의 stopReason 으로 판정한다.
+    // If the user aborted with Esc, stop the loop. An abort is a "stop" signal, so
+    // don't auto re-inject; transition to paused and let the user resume manually.
+    // Determined from the last assistant message's stopReason.
     const msgs = event.messages ?? [];
     let lastAssistant: AssistantMessage | undefined;
     for (let i = msgs.length - 1; i >= 0; i--) {
@@ -197,7 +197,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // 토큰 예산 초과 → 멈춤
+    // Token budget exceeded → stop
     if (goal.tokenBudget && cumulativeTokens(ctx) >= goal.tokenBudget) {
       goal.status = "budget-limited";
       goal.note = `token budget ${goal.tokenBudget} reached`;
@@ -213,26 +213,26 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // 백그라운드 subagent 가 아직 돌고 있으면 continuation 을 보류한다.
-    // 그냥 return 만 해도 되는 이유: subagents 가 각 run 을 끝낼 때마다
-    // "[subagent ... finished]" 메시지를 sendUserMessage 로 넣어 새 턴을 만든다.
-    // 그 턴의 agent_end 때엔 runningSubagents 가 이미 감소해 있으므로, 마지막
-    // subagent 까지 끝나면(running→0) 루프가 자연스럽게 재개된다. 여러개면
-    // 마지막 하나곌지 매번 보류→재개 를 반복한다. (별도 resume kick 은 두지
-    // 않는다 — 그러면 finished 턴과 이중으로 continuation 이 투입된다.)
+    // If background subagents are still running, hold off the continuation.
+    // Just returning is enough because: every time subagents finishes a run, it inserts a
+    // "[subagent ... finished]" message via sendUserMessage, creating a new turn.
+    // At that turn's agent_end, runningSubagents has already decremented, so once the last
+    // subagent finishes (running→0) the loop naturally resumes. With several of them,
+    // it repeats hold-off→resume each time until the last one. (No separate resume kick —
+    // that would double-inject the continuation alongside the finished turn.)
     if (runningSubagents > 0) {
       setStatus(ctx);
       return;
     }
 
-    // 횟수 제한 없음 (Ralph loop). 끝까지 돈다.
+    // No iteration limit (Ralph loop). Runs to completion.
     goal.iteration += 1;
     persist();
     setStatus(ctx);
     kick(ctx, "continue");
   });
 
-  // ── 목표 종료 툴 (모델이 호출) ────────────────────────────────────────
+  // ── Goal-termination tools (called by the model) ────────────────────
 
   pi.registerTool({
     name: "goal_done",
@@ -281,7 +281,7 @@ export default function (pi: ExtensionAPI) {
       reason: Type.String({ description: "Why the goal is blocked and what input is needed." }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      // --no-block 모드: 차단을 무시하고 계속 돈다. 상태는 pursuing 유지.
+      // --no-block mode: ignore the block and keep running. Status stays pursuing.
       if (goal?.ignoreBlocked) {
         if (ctx.hasUI) ctx.ui.notify("🚧 goal_blocked ignored (--no-block) — continuing.", "info");
         return {
@@ -316,9 +316,9 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── /goal 명령 (수명주기 제어) ────────────────────────────────────────
+  // ── /goal command (lifecycle control) ─────────────────────────
 
-  // 선행 플래그 파싱: --budget N | --budget=N, --no-block (goal_blocked 무시)
+  // Parse leading flags: --budget N | --budget=N, --no-block (ignore goal_blocked)
   const parseObjective = (
     raw: string,
   ): { objective: string; tokenBudget?: number; ignoreBlocked: boolean } => {
@@ -373,7 +373,7 @@ export default function (pi: ExtensionAPI) {
       const [sub, ...subRest] = trimmed.split(/\s+/);
       const _subArg = subRest.join(" ").trim();
 
-      // 수명주기 서브커맨드
+      // Lifecycle subcommands
       if (trimmed === "" || sub === "status") {
         showStatus(ctx);
         return;
@@ -414,7 +414,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // 그 외는 새 목표 설정 (sub 도 objective 의 일부)
+      // Otherwise set a new goal (sub is part of the objective too)
       const { objective, tokenBudget, ignoreBlocked } = parseObjective(trimmed);
       if (!objective) {
         ctx.ui.notify("Usage: /goal <objective>  [--budget N] [--no-block]", "warning");
@@ -444,7 +444,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 세션 복원 ─────────────────────────────────────────────────────────
+  // ── Session restore ────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
     goal = null;
@@ -458,8 +458,8 @@ export default function (pi: ExtensionAPI) {
         }
       }
     }
-    // 복원된 목표가 한창 추적 중이었다면, 멈춰있던 루프를 사용자가 직접
-    // 재개하도록 paused 로 낮춰 둔다(재시작 직후 자동 폭주 방지).
+    // If the restored goal was actively being tracked, lower it to paused so the user resumes
+    // the stopped loop manually (prevents an automatic runaway right after restart).
     if (goal && goal.status === "pursuing") {
       goal.status = "paused";
       goal.note = "auto-paused on session restore — /goal resume to continue";

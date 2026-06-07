@@ -1,29 +1,29 @@
-// stats — pi 사용 내역 대시보드. opencode 의 `stats` 처럼 세션/글로벌 사용량을
-// 풀스크린 TUI 로 보여준다.
+// stats — a pi usage dashboard. Like opencode's `stats`, it shows session/global usage
+// in a fullscreen TUI.
 //
-// 동작:
-//   /stats           → 풀스크린 오버레이 (Session 탭으로 시작)
-//   pi --tools ... 와 무관하게 LLM 컨텍스트엔 0 영향(순수 뷰어 + 디스크 읽기 전용).
+// Behavior:
+//   /stats           → fullscreen overlay (starts on the Session tab)
+//   Regardless of `pi --tools ...`, it has zero impact on the LLM context (pure viewer + read-only disk access).
 //
-// 탭:
-//   [Session]  현재 세션만 집계
-//   [Global]   ~/.pi/agent/sessions/ 아래 전체 세션 집계 + 세션 리스트 드릴다운
+// Tabs:
+//   [Session]  aggregates the current session only
+//   [Global]   aggregates every session under ~/.pi/agent/sessions/ + session list drill-down
 //
-// 키:
-//   Tab / ← →     탭 전환 (Session ↔ Global)
-//   ↑↓ / j k      스크롤 (1줄)
-//   Space / b     페이지 다운/업
-//   g / G         맨 위 / 맨 아래
-//   s             (Global) 세션 리스트 토글
-//   Enter         (세션 리스트) 선택 세션 드릴다운
-//   Esc / q       닫기 (드릴다운/리스트면 한 단계 위로)
+// Keys:
+//   Tab / ← →     switch tabs (Session ↔ Global)
+//   ↑↓ / j k      scroll (1 line)
+//   Space / b     page down/up
+//   g / G         top / bottom
+//   s             (Global) toggle the session list
+//   Enter         (session list) drill down into the selected session
+//   Esc / q       close (when in drill-down/list, go up one level)
 //
-// 단축키는 두지 않는다: 쓸 만한 ctrl 조합은 대부분 내장 바인딩과 겹치고(ctrl+s 는
-// app.models.save), 비어있는 조합은 터미널 흐름제어에 먹혀 신뢰할 수 없다. 원하면
-// keybindings 설정에서 직접 /stats 에 키를 바인딩하면 된다.
+// No keyboard shortcut is bound: most usable ctrl combos collide with built-in bindings (ctrl+s is
+// app.models.save), and the empty combos get swallowed by terminal flow control and can't be trusted. If you want one,
+// bind a key to /stats directly in your keybindings config.
 //
-// 데이터: aggregate.ts 가 jsonl 을 스트리밍 파싱(읽기 전용). 자식 subagent
-// 프로세스에선 뜨지 않게 PI_SUBAGENT 가드.
+// Data: aggregate.ts streams and parses the jsonl (read-only). Guarded by PI_SUBAGENT so it
+// doesn't show up in child subagent processes.
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Focusable, matchesKey, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
@@ -48,17 +48,17 @@ import {
 } from "./format.ts";
 
 export default function statsExtension(pi: ExtensionAPI) {
-  if (process.env.PI_SUBAGENT) return; // 자식 프로세스에선 비활성
+  if (process.env.PI_SUBAGENT) return; // disabled in child processes
 
   async function openStats(ctx: ExtensionContext): Promise<void> {
     if (!ctx.hasUI) return;
 
     const sessionFile = ctx.sessionManager.getSessionFile();
 
-    // 먼저 로딩 표시. 큰 글로벌 집계는 시간이 걸릴 수 있다.
+    // Show a loading indicator first. A large global aggregation can take a while.
     ctx.ui.setStatus("stats", "Computing stats…");
 
-    // 현재 세션 집계(파일 없으면 ephemeral → 빈 집계).
+    // Aggregate the current session (no file means ephemeral → empty aggregate).
     let sessionAgg: AggregateStats;
     try {
       sessionAgg = sessionFile ? await aggregateSession(sessionFile) : statsFromSessionEmpty();
@@ -66,7 +66,7 @@ export default function statsExtension(pi: ExtensionAPI) {
       sessionAgg = statsFromSessionEmpty();
     }
 
-    // 글로벌 집계.
+    // Global aggregation.
     let globalAgg: AggregateStats;
     try {
       globalAgg = await aggregateGlobal();
@@ -114,7 +114,7 @@ function statsFromSessionEmpty(): AggregateStats {
   };
 }
 
-// ─── 뷰어 컴포넌트 ───────────────────────────────────────────────────────────
+// ─── Viewer component ─────────────────────────────────────────────────
 
 type Tab = "session" | "global";
 type View = "dashboard" | "list" | "detail";
@@ -123,10 +123,10 @@ class StatsViewer implements Focusable {
   focused = false;
   private tab: Tab = "session";
   private view: View = "dashboard";
-  private scroll = 0; // dashboard/detail 스크롤
-  private selected = 0; // 세션 리스트 선택
-  private listScroll = 0; // 세션 리스트 스크롤
-  private detailAgg?: AggregateStats; // 드릴다운한 세션 집계
+  private scroll = 0; // dashboard/detail scroll
+  private selected = 0; // session list selection
+  private listScroll = 0; // session list scroll
+  private detailAgg?: AggregateStats; // aggregate of the drilled-down session
 
   constructor(
     private sessionAgg: AggregateStats,
@@ -146,7 +146,7 @@ class StatsViewer implements Focusable {
   }
 
   handleInput(data: string): void {
-    // 닫기 / 뒤로
+    // close / back
     if (matchesKey(data, "escape") || data === "q") {
       if (this.view === "detail") {
         this.view = "list";
@@ -161,7 +161,7 @@ class StatsViewer implements Focusable {
       return;
     }
 
-    // 탭 전환 (dashboard 에서만)
+    // switch tabs (dashboard only)
     if (
       this.view === "dashboard" &&
       (matchesKey(data, "tab") || matchesKey(data, "left") || matchesKey(data, "right"))
@@ -171,7 +171,7 @@ class StatsViewer implements Focusable {
       return;
     }
 
-    // Global 탭: 세션 리스트 토글
+    // Global tab: toggle the session list
     if (this.tab === "global" && this.view === "dashboard" && data === "s") {
       if (this.globalAgg.sessions.length > 0) {
         this.view = "list";
@@ -186,7 +186,7 @@ class StatsViewer implements Focusable {
       return;
     }
 
-    // dashboard / detail 스크롤
+    // dashboard / detail scroll
     const page = this.pageStep;
     if (matchesKey(data, "up") || data === "k") this.scroll = Math.max(0, this.scroll - 1);
     else if (matchesKey(data, "down") || data === "j") this.scroll += 1;
@@ -218,7 +218,7 @@ class StatsViewer implements Focusable {
     }
   }
 
-  // ── 렌더 ────────────────────────────────────────────────────────────────
+  // ── Render ───────────────────────────────────────────────────────
 
   render(width: number): string[] {
     const innerW = width - 2;
@@ -230,14 +230,14 @@ class StatsViewer implements Focusable {
     let body: string[];
     if (this.view === "list") {
       body = this.renderSessionList(innerW, viewport);
-      // 리스트는 자체적으로 viewport 에 맞춰 잘려 나온다.
+      // the list slices itself to fit the viewport.
       const lines = [...header, ...body];
       while (lines.length < rows - 1) lines.push("");
       lines.push(footer);
       return lines.map((l) => truncateToWidth(` ${l}`, innerW + 2));
     }
 
-    // dashboard / detail: 전체 body 를 만든 뒤 scroll 로 슬라이스
+    // dashboard / detail: build the full body, then slice by scroll
     const agg =
       this.view === "detail"
         ? this.detailAgg!
@@ -275,7 +275,7 @@ class StatsViewer implements Focusable {
         "",
       ];
     }
-    // dashboard: 탭바
+    // dashboard: tab bar
     const sessionTab = this.tabLabel("Session", this.tab === "session");
     const globalTab = this.tabLabel("Global", this.tab === "global");
     return [` ${th.bold(th.fg("accent", "📊 pi stats"))}   ${sessionTab} ${globalTab}`, ""];
@@ -314,7 +314,7 @@ class StatsViewer implements Focusable {
     return th.fg("dim", ` ${keys}${pos}`);
   }
 
-  // 대시보드 본문: Overview, Cost & Tokens, Models, Tools (+ Global 이면 활동 일자).
+  // Dashboard body: Overview, Cost & Tokens, Models, Tools (+ active days if Global).
   private renderDashboard(innerW: number, agg: AggregateStats, isGlobal: boolean): string[] {
     const th = this.theme;
     const out: string[] = [];
@@ -376,7 +376,7 @@ class StatsViewer implements Focusable {
     costRows.push({ label: "Total tokens", value: formatTokens(t.input + t.output), accent: true });
     pushSection(out, renderBox(th, boxW, "Cost & Tokens", costRows));
 
-    // Models (assistant 메시지 수 기준)
+    // Models (by assistant message count)
     const modelRows: BarRow[] = [...agg.models.entries()]
       .map(([label, count]) => ({ label, count }))
       .sort((a, b) => b.count - a.count);
@@ -384,7 +384,7 @@ class StatsViewer implements Focusable {
       pushSection(out, renderBars(th, boxW, "Models", modelRows, 12));
     }
 
-    // Tools (호출 수 기준)
+    // Tools (by call count)
     const toolRows: BarRow[] = [...agg.tools.entries()]
       .map(([label, count]) => ({ label, count }))
       .sort((a, b) => b.count - a.count);
@@ -392,7 +392,7 @@ class StatsViewer implements Focusable {
       pushSection(out, renderBars(th, boxW, "Tool Usage", toolRows, 20));
     }
 
-    // Activity by hour (로컬 시간대 히트맵) + 요일별 막대
+    // Activity by hour (local-timezone heatmap) + per-weekday bars
     const hourTotal = agg.byHour.reduce((a, b) => a + b, 0);
     if (hourTotal > 0) {
       pushSection(out, renderHourHeatmap(th, boxW, "Activity by Hour", agg.byHour));
@@ -405,16 +405,16 @@ class StatsViewer implements Focusable {
       }
     }
 
-    // Global: 최근 일자별 비용 (최대 14일)
+    // Global: recent per-day cost (up to 14 days)
     if (isGlobal && agg.costByDay.size > 0) {
       const dayKV: KV[] = [...agg.costByDay.entries()]
-        .sort((a, b) => (a[0] < b[0] ? 1 : -1)) // 최신 먼저
+        .sort((a, b) => (a[0] < b[0] ? 1 : -1)) // newest first
         .slice(0, 14)
         .map(([day, cost]) => ({ label: day, value: formatCost(cost) }));
       pushSection(out, renderBox(th, boxW, "Cost by Day (recent)", dayKV));
     }
 
-    // Global dashboard: 세션 리스트 진입 힌트
+    // Global dashboard: hint to enter the session list
     if (isGlobal && agg.sessions.length > 0) {
       out.push(` ${th.fg("dim", `Press 's' to browse ${agg.sessions.length} sessions →`)}`);
       out.push("");
@@ -423,7 +423,7 @@ class StatsViewer implements Focusable {
     return out;
   }
 
-  // 세션 리스트(글로벌 드릴다운). 각 항목 2줄.
+  // Session list (global drill-down). Each item is 2 lines.
   private renderSessionList(innerW: number, viewport: number): string[] {
     const th = this.theme;
     const sessions = this.globalAgg.sessions;
@@ -462,7 +462,7 @@ class StatsViewer implements Focusable {
   dispose(): void {}
 }
 
-// ─── 헬퍼 ────────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────
 
 function pushSection(out: string[], box: string[]): void {
   for (const l of box) out.push(l);

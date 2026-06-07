@@ -1,21 +1,21 @@
-// subagents — 백그라운드 비동기 멀티 서브에이전트.
+// subagents — background asynchronous multi-subagents.
 //
-// 설계 원칙:
-//   1. 항상 백그라운드 · 멀티. spawn_subagents({ tasks: [...] }) 는 자식 pi
-//      프로세스들을 띄우고 "즉시" return 한다. 메인 에이전트는 블록되지 않는다.
-//   2. 각 자식이 끝나면 그 "최종 출력만" 메인 에이전트에 주입한다(컨텍스트 절약).
-//   3. 자식의 전체 트랜스크립트(thinking·툴호출 포함)는 세션에 custom 엔트리로
-//      영속 저장된다. LLM 컨텍스트엔 절대 안 들어가고, 디스크(세션 jsonl)에만 남는다.
-//   4. Ctrl+\ 로 subagent view 오버레이를 띄워 과거 run 들을 조회한다. 세션에서
-//      복원하므로 pi 를 껐다 켜도 같은 세션을 열면 계속 볼 수 있다(opencode 스타일).
-//      ↑↓ / j k / space·b / g·G 키로 스크롤(터미널 마우스 전달에 의존하지 않는다). 트랜스크립트 텍스트는 렌더 전 TAB/제어문자를
-//      제거해 pi-tui 폭 계산 불일치로 인한 렌더 크래시를 막는다(sanitizeForRender).
-//   5. 진행 중인 자식은 send_to_subagent 로 follow-up 을 큐잉(steering)하고,
-//      abort_subagent 로 중단할 수 있다. 완료·실패·중단은 모두 메인에게 메시지로 알림이
-//      가므로, 메인은 sleep/폴링 없이 그냥 일을 이어가거나 멈춰 있으면 된다.
+// Design principles:
+//   1. Always background and multi. spawn_subagents({ tasks: [...] }) spawns the
+//      child pi processes and returns "immediately". The main agent is not blocked.
+//   2. When each child finishes, only its "final output" is injected into the main agent (context savings).
+//   3. The child's full transcript (including thinking and tool calls) is persisted to the session as a
+//      custom entry. It never enters the LLM context and lives only on disk (the session jsonl).
+//   4. Press Ctrl+\ to open the subagent view overlay and browse past runs. Because they are
+//      restored from the session, you can quit and relaunch pi and still see them by opening the same session (opencode style).
+//      Scroll with ↑↓ / j k / space·b / g·G keys (does not rely on terminal mouse forwarding). Transcript text has TAB/control characters
+//      stripped before render to prevent render crashes from pi-tui width-calculation mismatches (sanitizeForRender).
+//   5. For a running child you can queue follow-ups with send_to_subagent (steering) and
+//      abort it with abort_subagent. Completion, failure, and abort are all reported to the main agent as messages,
+//      so the main agent can just keep working or stay idle without sleeping/polling.
 //
-// 자식 실행: pi --mode json -p --session-dir <격리> --session-id <runId>
-//   (격리 세션으로 멀티턴 context 유지, 메인 /resume 목록은 오염 안 됨)
+// Child execution: pi --mode json -p --session-dir <isolated> --session-id <runId>
+//   (isolated session keeps multi-turn context; the main /resume list is not polluted)
 
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -42,13 +42,13 @@ import { Type } from "typebox";
 import { type AgentScope, discoverAgents, formatAgentList } from "./agents.ts";
 import { isTransientError } from "./transient.ts";
 
-// ─── 상수 ────────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-const MAX_TASKS = 8; // 한 번에 띄울 수 있는 최대 task 수
-const RUN_ENTRY_TYPE = "subagent-run"; // 세션 custom 엔트리 타입 (전체 트랜스크립트)
-const VIEW_SHORTCUT = "ctrl+\\"; // subagent view 오버레이. 내장 바인딩에 없어 충돌 없고, kitty 미지원 터미널(Zed 등)에서도 legacy 바이트(\x1c)로 들어온다.
+const MAX_TASKS = 8; // max number of tasks that can be spawned at once
+const RUN_ENTRY_TYPE = "subagent-run"; // session custom entry type (full transcript)
+const VIEW_SHORTCUT = "ctrl+\\"; // subagent view overlay. Not in the built-in bindings so no conflict, and on terminals without kitty support (Zed, etc.) it arrives as the legacy byte (\x1c).
 
-// ─── 타입 ────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────
 
 interface RunUsage {
   input: number;
@@ -62,39 +62,39 @@ interface RunUsage {
 
 type RunStatus = "running" | "done" | "failed";
 
-// 한 subagent 의 한 turn(= 프롬프트 1회 + 그에 대한 응답).
+// One turn of a subagent (= one prompt + the response to it).
 interface Turn {
-  prompt: string; // 이 turn 에서 자식에게 보난 프롬프트
-  transcript: TranscriptItem[]; // 이 turn 의 전체 트랜스크립트
-  finalOutput: string; // 이 turn 의 최종 응답 텍스트
+  prompt: string; // the prompt sent to the child in this turn
+  transcript: TranscriptItem[]; // the full transcript of this turn
+  finalOutput: string; // the final response text of this turn
   startedAt: number;
   endedAt?: number;
   error?: string;
 }
 
-// 세션에 저장되는 한 subagent run 의 전체 기록.
+// The full record of one subagent run, persisted to the session.
 interface SubagentRun {
   runId: string;
-  batchId: string; // 같은 spawn_subagents 호출로 묶인 run 들의 공통 id
+  batchId: string; // shared id for runs grouped by the same spawn_subagents call
   agent: string;
-  title: string; // 목록 표시용 제목 (메인이 spawn 시 필수 지정)
-  task: string; // 최초 task (첫 turn 의 프롬프트)
+  title: string; // title for list display (required when the main agent spawns)
+  task: string; // initial task (the prompt of the first turn)
   status: RunStatus;
   startedAt: number;
   endedAt?: number;
   model?: string;
-  tools?: string[]; // follow-up 재실행 시 동일하게 적용 (--tools allowlist)
-  excludeTools?: string[]; // 차단할 도구 (--exclude-tools denylist). spawn 시 task별 지정.
-  agentSystemPrompt?: string; // follow-up 재실행 시 시스템 프롬프트 재구성용 (빈 문자열=없음)
-  sessionDir: string; // ꈁ리된 세션 저장 디렉터리 (메인 /resume 에 안 섮임)
-  sessionId: string; // pi --session-id 로 쓰는 고정 id (= runId)
-  usage: RunUsage; // 누적 usage (모든 turn 합산)
-  turns: Turn[]; // turn 히스토리
-  // 편의: 현재(마지막) turn 의 트랜스크립트/최종출력 미러.
+  tools?: string[]; // applied identically on follow-up re-runs (--tools allowlist)
+  excludeTools?: string[]; // tools to block (--exclude-tools denylist). Specified per task at spawn.
+  agentSystemPrompt?: string; // used to reconstruct the system prompt on follow-up re-runs (empty string = none)
+  sessionDir: string; // isolated session storage directory (does not show up in the main /resume)
+  sessionId: string; // fixed id used for pi --session-id (= runId)
+  usage: RunUsage; // cumulative usage (summed across all turns)
+  turns: Turn[]; // turn history
+  // Convenience: mirror of the current (last) turn's transcript/final output.
   transcript: TranscriptItem[];
   finalOutput: string;
   error?: string;
-  // 메인 스레드가 아직 수령하지 않은 응답 turn 의 인덱스 목록.
+  // Indices of response turns the main thread has not yet received.
   unreadTurns: number[];
 }
 
@@ -104,24 +104,24 @@ interface TranscriptItem {
   toolName?: string;
 }
 
-// ─── 헬퍼 ────────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function newId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
-// 터미널 렌더용 텍스트 정화. 리터럴 TAB 과 그 외 C0 제어문자는 pi-tui 의 폭 계산
-// (visibleWidth 는 TAB=3 으로 세지만 compositor 의 sliceByColumn 은 그대로 흘려보내
-// 폭이 어긋난다)을 깨뜨려 "Rendered line exceeds terminal width" 크래시를 유발한다.
-// 표시 전에 TAB→공백 확장, 그 외 제어문자는 제거해 두 계산이 항상 일치하게 만든다.
-// 캡처 시점에 적용하므로 세션에 영속되는 데이터도 깨끗하다.
+// Sanitize text for terminal rendering. Literal TABs and other C0 control characters break pi-tui's
+// width calculation (visibleWidth counts TAB as 3, but the compositor's sliceByColumn passes it through
+// unchanged, so the widths diverge), causing a "Rendered line exceeds terminal width" crash.
+// Before display, expand TAB→spaces and strip other control characters so both calculations always agree.
+// Applied at capture time, so the data persisted to the session is clean too.
 export function sanitizeForRender(text: string): string {
   if (!text) return text;
   let out = "";
   let col = 0;
   for (const ch of text) {
     if (ch === "\t") {
-      // 탭을 다음 4칸 경계까지 공백으로 확장.
+      // Expand the tab to spaces up to the next 4-column boundary.
       const n = 4 - (col % 4);
       out += " ".repeat(n);
       col += n;
@@ -130,7 +130,7 @@ export function sanitizeForRender(text: string): string {
       col = 0;
     } else {
       const code = ch.codePointAt(0) ?? 0;
-      // C0 제어문자(\n 제외)와 DEL 제거. 그 외는 보존(폭 계산은 pi-tui 에 위임).
+      // Strip C0 control characters (except \n) and DEL. Preserve the rest (width calculation is delegated to pi-tui).
       if ((code >= 0x00 && code < 0x20) || code === 0x7f) continue;
       out += ch;
       col += 1;
@@ -139,8 +139,8 @@ export function sanitizeForRender(text: string): string {
   return out;
 }
 
-// 자식 subagent 세션을 보관하는 격리 디렉터리. 메인 cwd 기반 세션 폴더와 분리되어
-// /resume 목록을 오염하지 않는다.
+// Isolated directory that holds child subagent sessions. Kept separate from the main cwd-based session
+// folder so it does not pollute the /resume list.
 function subagentSessionRoot(): string {
   return path.join(getAgentDir(), ".subagent-sessions");
 }
@@ -161,11 +161,11 @@ function shortenPath(p: string): string {
   return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
 }
 
-// 자식 pi 를 어떻게 실행할지 결정 (예제의 getPiInvocation 과 동일 로직).
+// Decide how to run the child pi (same logic as the example's getPiInvocation).
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
-  // pi-gui/pi-web 호스트에서는 process.argv[1] 이 pi CLI 가 아니라 백엔드
-  // 진입점(server/index.ts)이다. 그걸 그대로 실행하면 자식이 또 백엔드를
-  // 띄우려다 포트(4317) 충돌(EADDRINUSE)로 죽는다. 이 호스트에서는 실제 pi 를 쓴다.
+  // On pi-gui/pi-web hosts, process.argv[1] is not the pi CLI but the backend
+  // entry point (server/index.ts). Running that directly makes the child try to spin up
+  // another backend and die on a port (4317) conflict (EADDRINUSE). On these hosts, use the real pi.
   if (process.env.PI_WEB_HOST) {
     return { command: "pi", args };
   }
@@ -190,7 +190,7 @@ async function writePromptToTempFile(
   return { dir, filePath };
 }
 
-// assistant 메시지 content 를 트랜스크립트 항목들로 평탄화.
+// Flatten assistant message content into transcript items.
 export function flattenAssistant(msg: AssistantMessage): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   for (const c of msg.content) {
@@ -235,7 +235,7 @@ function formatToolCallArgs(toolName: string, args: Record<string, unknown>): st
   }
 }
 
-// 트랜스크립트에서 마지막 assistant text(= 최종 출력) 추출.
+// Extract the last assistant text (= final output) from the transcript.
 export function finalOutputFrom(transcript: TranscriptItem[]): string {
   for (let i = transcript.length - 1; i >= 0; i--) {
     if (transcript[i].kind === "text") return transcript[i].text;
@@ -243,15 +243,15 @@ export function finalOutputFrom(transcript: TranscriptItem[]): string {
   return "";
 }
 
-// ─── 자식 spawn + 스트리밍 ─────────────────────────────────────────────────
-// 자식 pi 를 띄워 한 turn 을 실행하고 JSON 이벤트를 파싱해 run/turn 을 갱신한다.
+// ─── Child spawn + streaming ─────────────────────────────────────────────────
+// Spawn the child pi to run one turn, parse JSON events, and update the run/turn.
 //
-// 세션은 격리 디렉터리(run.sessionDir)에 run.sessionId 로 저장된다.
-//   - 첫 turn: 새 세션 생성 (--session-id)
-//   - follow-up: 같은 세션 이어서 실행 (이미 존재하므로 자동 이어짐)
-// 이렇게 하면 이전 대화 context 가 요약 없이 그대로 유지된다.
+// The session is saved to the isolated directory (run.sessionDir) under run.sessionId.
+//   - First turn: creates a new session (--session-id)
+//   - Follow-up: continues the same session (auto-continued since it already exists)
+// This keeps the prior conversation context intact, without summarization.
 //
-// onProgress 는 turn 이 갱신될 때마다 호출된다. signal 로 메인 abort 시 자식도 죽인다.
+// onProgress is called every time the turn is updated. On main abort via signal, the child is killed too.
 export function runSubagentTurn(
   run: SubagentRun,
   prompt: string,
@@ -260,10 +260,10 @@ export function runSubagentTurn(
   signal: AbortSignal | undefined,
   onProgress: () => void,
 ): Promise<Turn> {
-  // 이 turn 을 위한 새 Turn 을 만들고 run 에 붙인다.
+  // Create a new Turn for this turn and attach it to the run.
   const turn: Turn = { prompt, transcript: [], finalOutput: "", startedAt: Date.now() };
   run.turns.push(turn);
-  run.transcript = turn.transcript; // 현재 turn 미러
+  run.transcript = turn.transcript; // current turn mirror
   run.finalOutput = "";
   run.status = "running";
   run.error = undefined;
@@ -292,9 +292,9 @@ export function runSubagentTurn(
         cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
-        // 자식 subagent 프로세스임을 마킹. 자식 pi 안에서도 로드되는 다른 익스텐션
-        // (예: telegram)이 자식의 agent_end 에 반응해 이중 알림을 보내는 걸 막는다.
-        // PI_WEB_HOST 는 제거: 자식은 진짜 pi CLI 이지 pi-gui 호스트가 아니다.
+        // Mark this as a child subagent process. Prevents other extensions also loaded inside the child pi
+        // (e.g. telegram) from reacting to the child's agent_end and sending duplicate notifications.
+        // PI_WEB_HOST is removed: the child is a real pi CLI, not a pi-gui host.
         env: (() => {
           const e: NodeJS.ProcessEnv = { ...process.env, PI_SUBAGENT: "1" };
           delete e.PI_WEB_HOST;
@@ -376,7 +376,7 @@ export function runSubagentTurn(
       turn.finalOutput = finalOutputFrom(turn.transcript);
       run.finalOutput = turn.finalOutput;
       if (signal?.aborted) {
-        // 명시적 abort: 부분 출력이 있어도 done 으로 됕지 않는다(상태 결정적).
+        // Explicit abort: even if there is partial output, it does not become done (state is deterministic).
         run.status = "failed";
         run.error = "aborted";
         turn.error = "aborted";
@@ -456,40 +456,40 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
-  // 자식 subagent 안에서는 subagent 도구를 일절 등록하지 않는다.
-  // spawn 시 env 에 PI_SUBAGENT=1 이 박히므로(아래 runSubagentTurn 참고),
-  // 자식 pi 가 또 spawn_subagents 를 호출해 손주 subagent 를 띄우는 무한 재귀를
-  // 코드 레벨에서 차단한다. 자식은 자기만의 격리 세션이라 다룰 run 도 없어서
-  // list/fetch/send/abort 도 전부 무의미 — 통째로 건너뛴다.
+  // Inside a child subagent, do not register any subagent tools at all.
+  // Since PI_SUBAGENT=1 is set in the env at spawn (see runSubagentTurn below),
+  // this blocks at the code level the infinite recursion where a child pi calls
+  // spawn_subagents again to spawn grandchild subagents. The child has its own isolated session
+  // with no runs to manage, so list/fetch/send/abort are all meaningless — skip the whole thing.
   if (process.env.PI_SUBAGENT === "1") return;
 
-  // 메모리상의 진행 중/완료 run 들. 세션 복원 시 디스크에서 채운다.
+  // In-memory running/completed runs. Filled from disk on session restore.
   const runs = new Map<string, SubagentRun>();
-  // 진행 중인 run 의 AbortController. abort_subagent 가 이걸 불러 자식을 죽인다.
+  // AbortController for the running run. abort_subagent calls this to kill the child.
   const controllers = new Map<string, AbortController>();
-  // 진행 중인 run 에 대기 중인 follow-up 프롬프트 큐(steering). 현재 turn 이 끝나면 순서대로 소비.
+  // Queue of pending follow-up prompts for a running run (steering). Consumed in order when the current turn ends.
   const pendingFollowUps = new Map<string, string[]>();
-  // steer 요청: 현재 turn 을 abort 하고 그 즉시 이 메시지로 새 turn 을 시작한다.
-  // abort 후 executeTurn 의 완료 콜백에서 소비된다(pendingFollowUps 보다 우선).
+  // steer request: abort the current turn and immediately start a new turn with this message.
+  // Consumed in executeTurn's completion callback after the abort (takes priority over pendingFollowUps).
   const steerRequests = new Map<string, string>();
-  let renderViewer: (() => void) | undefined; // 열린 뷰어가 있으면 갱신용
+  let renderViewer: (() => void) | undefined; // for refreshing if a viewer is open
 
-  // 진행 표시 widget 갱신
+  // Refresh the progress widget
   const updateWidget = (ctx: ExtensionContext) => {
     const all = [...runs.values()];
     const running = all.filter((r) => r.status === "running").length;
-    // 다른 extension(특히 goal 루프)이 "백그라운드 subagent 가 도는 동안
-    // continuation 을 보류"할 수 있도록 진행 중 개수를 공유 버스에 흘린다.
-    // UI 유무와 무관하게 항상 emit 한다 (print 모드 자식엔 PI_SUBAGENT 가드로 미도달).
+    // Emit the running count on a shared bus so other extensions (especially the goal loop) can
+    // "hold continuation while background subagents are running".
+    // Always emit regardless of whether there is a UI (won't reach print-mode children due to the PI_SUBAGENT guard).
     try {
       pi.events.emit("subagents:running", { running });
     } catch {
-      /* 버스 미초기화 단계: 무시 */
+      /* bus not yet initialized: ignore */
     }
     if (!ctx.hasUI) return;
-    // run 이 하나라도 있으면 뷰어 단축키 hint 를 footer 에 노출한다.
-    // rawKeyHint / ctx.ui.theme 는 TUI theme(initTheme) 에 의존한다. pi-web 같은
-    // 비-TUI 호스트는 hasUI=true 여도 theme 가 없어 throw 하므로 전체를 방어한다.
+    // If there is at least one run, expose the viewer shortcut hint in the footer.
+    // rawKeyHint / ctx.ui.theme depend on the TUI theme (initTheme). Non-TUI hosts like pi-web
+    // have no theme even when hasUI=true, so they throw — guard the whole thing.
     try {
       const viewHint = all.length > 0 ? rawKeyHint(VIEW_SHORTCUT, "view subagents") : "";
       if (running > 0) {
@@ -504,17 +504,17 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("subagents", undefined);
       }
     } catch {
-      /* 비-TUI 호스트(theme 미초기화): widget 갱신은 조용히 건너뛴다. */
+      /* Non-TUI host (theme not initialized): silently skip the widget update. */
     }
   };
 
-  // run 을 세션에 영속(custom 엔트리 = LLM 컨텍스트 불참). 상태 바뀔 때마다 덮어쓴다.
+  // Persist a run to the session (custom entry = not in the LLM context). Overwritten on each state change.
   const persistRun = (run: SubagentRun) => {
     pi.appendEntry(RUN_ENTRY_TYPE, run as unknown as Record<string, unknown>);
   };
 
-  // 한 turn 을 실행한다(최초 task 또는 follow-up 공통). 완료되면 미수령 turn 으로
-  // 표시하고, 메인 에이전트에 "수령하라"는 짧은 알림만 보낸다(전문 주입 X).
+  // Execute one turn (shared by the initial task and follow-ups). When done, mark it as an unread
+  // turn and send the main agent only a short "go fetch it" notification (no full-text injection).
   const executeTurn = async (run: SubagentRun, prompt: string, ctx: ExtensionContext) => {
     const controller = new AbortController();
     controllers.set(run.runId, controller);
@@ -526,9 +526,9 @@ export default function (pi: ExtensionAPI) {
         promptFile = tmp.filePath;
         tmpDir = tmp.dir;
       }
-      // transient retry: 자식이 일시적 실패(rate limit/네트워크 깜빡)로 끝나면 같은
-      // 모델로 짧은 backoff 후 재시도한다. 모델 정체성은 유지(fallback 아님).
-      // abort 나 비-일시적 오류(잘못된 인자 등)는 재시도하지 않는다.
+      // transient retry: if the child ends with a transient failure (rate limit/network blip), retry with
+      // the same model after a short backoff. Model identity is kept (not a fallback).
+      // Aborts and non-transient errors (bad arguments, etc.) are not retried.
       const MAX_RETRIES = 2;
       for (let attempt = 0; ; attempt++) {
         await runSubagentTurn(run, prompt, promptFile, ctx.cwd, controller.signal, () => {
@@ -544,7 +544,7 @@ export default function (pi: ExtensionAPI) {
         ) {
           const backoffMs = 1000 * (attempt + 1);
           const prevErr = run.error ?? "";
-          // 실패한 turn 을 transcript 에서 제거(재시도가 새 turn 을 push 하므로 누적 방지).
+          // Remove the failed turn from the transcript (the retry pushes a new turn, so prevent accumulation).
           run.turns.pop();
           run.error =
             `transient failure (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${backoffMs}ms: ${prevErr}`.slice(
@@ -566,13 +566,13 @@ export default function (pi: ExtensionAPI) {
 
     const aborted = controller.signal.aborted;
 
-    // 방금 끝난 turn 인덱스를 미수령 목록에 추가.
+    // Add the just-finished turn index to the unread list.
     const turnIndex = run.turns.length - 1;
     if (!run.unreadTurns.includes(turnIndex)) run.unreadTurns.push(turnIndex);
     persistRun(run);
 
-    // steer 요청으로 abort 된 경우: 중단된 큐는 버리고, 그 즉시 새 메시지로 이어 돌린다.
-    // (중단 알림은 보내지 않고, 새 turn 의 완료 알림만 간다.)
+    // If aborted by a steer request: discard the interrupted queue and immediately continue with the new message.
+    // (No abort notification is sent; only the new turn's completion notification goes out.)
     const steerMsg = steerRequests.get(run.runId);
     if (aborted && steerMsg !== undefined) {
       steerRequests.delete(run.runId);
@@ -581,13 +581,13 @@ export default function (pi: ExtensionAPI) {
       updateWidget(ctx);
       return;
     }
-    // steer 가 아닌 그냥 abort 이면 혹시 남은 steer 요청·대기 큐를 정리.
+    // If it was a plain abort (not a steer), clean up any leftover steer request and pending queue.
     if (aborted) {
       steerRequests.delete(run.runId);
       pendingFollowUps.delete(run.runId);
     }
 
-    // 대기 중인 follow-up(steering)이 있으면 이어서 돌린다(정상 완료 시에만).
+    // If there is a pending follow-up (steering), continue with it (only on normal completion).
     const queue = pendingFollowUps.get(run.runId);
     if (!aborted && queue && queue.length > 0) {
       const next = queue.shift();
@@ -599,9 +599,9 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // 전문 대신 "수령하라"는 알림만 보낸다.
-    // 절충안: 실패는 메인이 빨리 알수록 좋으므로 steer(현재 턴 툴 실행 후 즉시 끜어듦),
-    // 성공은 급하지 않으므로 followUp(턴이 다 끝난 뒤 전달). idle 이면 둘 다 즉시.
+    // Send only a "go fetch it" notification instead of the full text.
+    // Tradeoff: failures are better known to the main agent quickly, so use steer (delivered right after the current turn's tool execution);
+    // successes are not urgent, so use followUp (delivered after the turn fully ends). When idle, both are immediate.
     const status = aborted ? "aborted" : run.status === "done" ? "finished" : "failed";
     let note: string;
     if (aborted) {
@@ -626,7 +626,7 @@ export default function (pi: ExtensionAPI) {
     updateWidget(ctx);
   };
 
-  // ── 도구: spawn_subagents (백그라운드 멀티, 즉시 return) ──────────────────
+  // ── Tool: spawn_subagents (background multi, returns immediately) ──────────────────
   pi.registerTool({
     name: "spawn_subagents",
     label: "Spawn Subagents",
@@ -660,7 +660,7 @@ export default function (pi: ExtensionAPI) {
       const { agents } = discoverAgents(ctx.cwd, scope);
       const byName = new Map(agents.map((a) => [a.name, a]));
 
-      // 부모의 현재 모델 ("current" 별칭 해석용).
+      // The parent's current model (for resolving the "current" alias).
       const currentModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 
       const tasks = params.tasks.slice(0, MAX_TASKS);
@@ -670,14 +670,14 @@ export default function (pi: ExtensionAPI) {
       const errors: string[] = [];
 
       for (const t of tasks) {
-        // agent 는 선택. 지정했는데 못 찾으면 무시 목록에 넣는다.
+        // agent is optional. If specified but not found, add it to the ignored list.
         const agent = t.agent ? byName.get(t.agent) : undefined;
         if (t.agent && !agent) {
           unknownAgents.push(t.agent);
           continue;
         }
 
-        // 모델 결정: task.model 이 agent 기본값을 덮어쓴다. "current" 는 부모 모델로.
+        // Model decision: task.model overrides the agent default. "current" maps to the parent's model.
         let model: string | undefined;
         if (t.model) {
           model = t.model === "current" ? currentModel : t.model;
@@ -689,7 +689,7 @@ export default function (pi: ExtensionAPI) {
           model = agent?.model;
         }
 
-        // agent 도 없고 모델도 못 정하면 실행 불가.
+        // If there is no agent and no model can be determined, it cannot run.
         if (!agent && !model) {
           errors.push(`task skipped: specify an agent or a model (no default available).`);
           continue;
@@ -722,7 +722,7 @@ export default function (pi: ExtensionAPI) {
         persistRun(run);
         accepted.push(`${title} (${runId})`);
 
-        // 백그라운드 실행 — await 하지 않는다.
+        // Background execution — do not await.
         void executeTurn(run, `Task: ${t.task}`, ctx);
       }
 
@@ -754,7 +754,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 도구: list_subagents (모든 run 과 미수령 상태) ──────────────────
+  // ── Tool: list_subagents (all runs and their unread status) ──────────────────
   pi.registerTool({
     name: "list_subagents",
     label: "List Subagents",
@@ -783,7 +783,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 도구: fetch_subagent_result (id 로 미수령 응답 수령) ───────────────
+  // ── Tool: fetch_subagent_result (receive an unread response by id) ───────────────
   pi.registerTool({
     name: "fetch_subagent_result",
     label: "Fetch Subagent Result",
@@ -842,7 +842,7 @@ export default function (pi: ExtensionAPI) {
         if (turn.error) parts.push(`Error: ${turn.error}`);
         parts.push(turn.finalOutput || "(no output)");
       }
-      // 수령 처리: 읽은 turn 을 미수령 목록에서 제거.
+      // Mark as received: remove the read turn from the unread list.
       if (!wantAll) {
         run.unreadTurns = run.unreadTurns.filter((i) => !indices.includes(i));
         persistRun(run);
@@ -859,7 +859,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 도구: send_to_subagent (id 로 추가 프롬프트, 세션 이어서) ─────────
+  // ── Tool: send_to_subagent (additional prompt by id, continuing the session) ─────────
   pi.registerTool({
     name: "send_to_subagent",
     label: "Send To Subagent",
@@ -900,12 +900,11 @@ export default function (pi: ExtensionAPI) {
       const deliverAs = params.deliverAs ?? "followUp";
       if (run.status === "running") {
         if (deliverAs === "steer") {
-          // 현재 turn 을 즉시 중단하고, 끝나면 이 메시지로 새 turn 을 시작한다.
-          // 중단 전에 올라온 대기 큐는 비우고(steer 가 우선), 이 메시지만 단독으로 넓는다.
-          // executeTurn 은 abort 시 큐를 지우므로, abort 가 처리된 뒤 의 완료 콜백에서
-          // 이어달린다. 경주 조건: abort 후 executeTurn 이 pendingFollowUps 를 비우므로,
-          // 여기서 큐를 설정해도 지워진다. 따라서 steer 는 "abort 완료를 기다렸다가 새 turn"
-          // 을 한번에 처리하는 전용 대기자를 둔다.
+          // Abort the current turn immediately, and when it ends start a new turn with this message.
+          // Clear the pending queue that arrived before the interrupt (steer takes priority) and run this message alone.
+          // Since executeTurn clears the queue on abort, it is continued from the completion callback after the abort is handled.
+          // Race condition: since executeTurn clears pendingFollowUps after abort, setting the queue here would also be cleared.
+          // So steer uses a dedicated waiter that handles "wait for the abort to complete, then start a new turn" in one step.
           steerRequests.set(run.runId, params.message);
           const controller = controllers.get(run.runId);
           controller?.abort();
@@ -922,7 +921,7 @@ export default function (pi: ExtensionAPI) {
             details: { found: true, running: true, steered: true },
           };
         }
-        // followUp: 큐에 넣어 현재 turn 이 끝난 뒤 자동으로 이어 돌린다.
+        // followUp: enqueue it so it automatically continues after the current turn ends.
         const queue = pendingFollowUps.get(run.runId) ?? [];
         queue.push(params.message);
         pendingFollowUps.set(run.runId, queue);
@@ -938,7 +937,7 @@ export default function (pi: ExtensionAPI) {
           details: { found: true, running: true, queued: true, queueLength: queue.length },
         };
       }
-      // idle: 백그라운드 재실행 — 같은 세션을 이어간다.
+      // idle: background re-run — continues the same session.
       void executeTurn(run, params.message, ctx);
       updateWidget(ctx);
       return {
@@ -953,7 +952,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 도구: abort_subagent (id 로 진행 중인 자식을 중단) ─────────────
+  // ── Tool: abort_subagent (abort a running child by id) ─────────────
   pi.registerTool({
     name: "abort_subagent",
     label: "Abort Subagent",
@@ -981,7 +980,7 @@ export default function (pi: ExtensionAPI) {
         };
       }
       const controller = controllers.get(run.runId);
-      // 대기 중인 follow-up 과 steer 요청도 함께 비운다(abort 는 사용자의 명시적 중단).
+      // Also clear pending follow-ups and steer requests (abort is the user's explicit interruption).
       const hadQueue =
         (pendingFollowUps.get(run.runId)?.length ?? 0) > 0 || steerRequests.has(run.runId);
       pendingFollowUps.delete(run.runId);
@@ -1014,7 +1013,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 뷰어 오버레이 (Ctrl+X) ───────────────────────────────────────────────
+  // ── Viewer overlay (Ctrl+X) ───────────────────────────────────────────────
   pi.registerShortcut(VIEW_SHORTCUT, {
     description: "Open subagent view (browse subagent runs & transcripts)",
     handler: async (ctx) => {
@@ -1043,17 +1042,17 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── 세션 복원: 디스크의 subagent-run 엔트리를 메모리로 ──────────────────────
+  // ── Session restore: load subagent-run entries from disk into memory ──────────────────────
   pi.on("session_start", async (_event, ctx) => {
     runs.clear();
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type === "custom" && entry.customType === RUN_ENTRY_TYPE) {
         const data = entry.data as SubagentRun | undefined;
         if (data && typeof data.runId === "string") {
-          // 같은 runId 의 최신 스냅샷이 뒤에 오므로 덮어쓴다.
-          // 복원 시점에 still "running" 이던 것은 죽은 프로세스이므로 failed 로 표시.
+          // The latest snapshot for the same runId comes later, so overwrite.
+          // Anything still "running" at restore time is a dead process, so mark it failed.
           const restored: SubagentRun = { ...data };
-          // 구 스냅샷 호환: 새 필드 백필.
+          // Old snapshot compatibility: backfill new fields.
           restored.turns = Array.isArray(restored.turns) ? restored.turns : [];
           restored.unreadTurns = Array.isArray(restored.unreadTurns) ? restored.unreadTurns : [];
           restored.transcript = Array.isArray(restored.transcript) ? restored.transcript : [];
@@ -1070,7 +1069,7 @@ export default function (pi: ExtensionAPI) {
   });
 }
 
-// ─── 뷰어 컴포넌트 ───────────────────────────────────────────────────────────
+// ─── Viewer component ───────────────────────────────────────────────────────────
 
 const statusIcon: Record<RunStatus, string> = { running: "⏳", done: "✅", failed: "❌" };
 
@@ -1085,8 +1084,8 @@ class SubagentViewer implements Focusable {
   focused = false;
   private mode: "list" | "detail" = "list";
   private selected = 0;
-  private scroll = 0; // detail 늨 스크롤
-  private listScroll = 0; // list 모드 스크롤 (선택 따라감)
+  private scroll = 0; // detail mode scroll
+  private listScroll = 0; // list mode scroll (follows the selection)
 
   constructor(
     private runs: SubagentRun[],
@@ -1095,12 +1094,12 @@ class SubagentViewer implements Focusable {
     private done: (r: void) => void,
   ) {}
 
-  // detail 모드 한 페이지 높이(스크롤 단위). header/footer 여유를 뺀 근사치.
+  // Detail mode one-page height (scroll unit). Approximate, minus header/footer margins.
   private get pageStep(): number {
     return Math.max(3, this.rows - 4);
   }
 
-  // 터미널 높이 (오버레이가 풀스크린이므로 전체 rows 사용, 약간의 여유만 남김).
+  // Terminal height (the overlay is fullscreen, so use all rows, leaving only a small margin).
   private get rows(): number {
     return Math.max(8, (this.tui.terminal.rows || 30) - 1);
   }
@@ -1116,7 +1115,7 @@ class SubagentViewer implements Focusable {
       return;
     }
     if (this.mode === "list") {
-      // 리스트: ↑↓ / j k 로 선택 이동, PgUp/PgDn / space b 로 점프, g/G 로 처음·끝.
+      // List: ↑↓ / j k to move selection, PgUp/PgDn / space b to jump, g/G for start/end.
       const last = this.runs.length - 1;
       if (matchesKey(data, "up") || data === "k") this.selected = Math.max(0, this.selected - 1);
       else if (matchesKey(data, "down") || data === "j")
@@ -1132,8 +1131,8 @@ class SubagentViewer implements Focusable {
         this.scroll = 0;
       }
     } else {
-      // 디테일: ↑↓ / j k 로 한 줄, PgUp/PgDn / space b 로 한 페이지, g/G 로 처음·끝.
-      // 아래쪽 상한은 render 가 maxScroll 로 다시 clamp 하므로 여기서는 크게 잡아도 된다.
+      // Detail: ↑↓ / j k for one line, PgUp/PgDn / space b for one page, g/G for start/end.
+      // The lower bound is re-clamped to maxScroll by render, so it's fine to set it large here.
       const page = this.pageStep;
       if (matchesKey(data, "up") || data === "k") this.scroll = Math.max(0, this.scroll - 1);
       else if (matchesKey(data, "down") || data === "j") this.scroll += 1;
@@ -1141,7 +1140,7 @@ class SubagentViewer implements Focusable {
         this.scroll = Math.max(0, this.scroll - page);
       else if (matchesKey(data, "pageDown") || data === " ") this.scroll += page;
       else if (data === "g" || matchesKey(data, "home")) this.scroll = 0;
-      else if (data === "G" || matchesKey(data, "end")) this.scroll = Number.MAX_SAFE_INTEGER; // render 가 maxScroll 로 clamp
+      else if (data === "G" || matchesKey(data, "end")) this.scroll = Number.MAX_SAFE_INTEGER; // render clamps to maxScroll
     }
   }
 
@@ -1158,7 +1157,7 @@ class SubagentViewer implements Focusable {
     );
     const viewport = Math.max(2, rows - header.length - 1); // 1 = footer
 
-    // 각 run 은 2줄(제목 + 메타). 선택 항목이 뷰포트 안에 들어오도록 스크롤 행을 맞춘다.
+    // Each run is 2 lines (title + meta). Adjust the scroll row so the selected item stays within the viewport.
     const rowsPerItem = 2;
     const itemsVisible = Math.max(1, Math.floor(viewport / rowsPerItem));
     if (this.selected < this.listScroll) this.listScroll = this.selected;
@@ -1176,7 +1175,7 @@ class SubagentViewer implements Focusable {
       const dur = r.endedAt ? `${Math.round((r.endedAt - r.startedAt) / 1000)}s` : "...";
       const stats = `${r.usage.turns}t ${formatTokens(r.usage.input + r.usage.output)}tok $${r.usage.cost.toFixed(3)}`;
       const unread = r.unreadTurns.length > 0 ? th.fg("accent", ` ●${r.unreadTurns.length}`) : "";
-      // 제목을 먼저 크게, 그 다음줄에 agent/메타.
+      // Title first (prominent), then agent/meta on the next line.
       const titleMax = Math.max(12, innerW - 12);
       const title = r.title.length > titleMax ? `${r.title.slice(0, titleMax)}…` : r.title;
       const head = `${statusIcon[r.status]} ${title}`;
@@ -1187,7 +1186,7 @@ class SubagentViewer implements Focusable {
     }
 
     const lines = [...header, ...body];
-    // 풀스크린을 채우도록 footer 앞에 빈 줄 패딩.
+    // Pad with blank lines before the footer to fill the fullscreen.
     while (lines.length < rows - 1) lines.push("");
     lines.push(footer);
     return lines.map((l) => truncateToWidth(` ${l}`, innerW + 2));
@@ -1205,7 +1204,7 @@ class SubagentViewer implements Focusable {
     if (r.error) head.push(th.fg("error", ` Error: ${r.error}`));
     head.push(th.fg("dim", ` ${"─".repeat(Math.max(4, innerW - 2))}`));
 
-    // 모든 turn 을 순회해 프롬프트 + 트랜스크립트를 보여준다.
+    // Iterate over all turns to show the prompt + transcript.
     const body: string[] = [];
     const turns =
       r.turns.length > 0
@@ -1246,7 +1245,7 @@ class SubagentViewer implements Focusable {
     }
     if (body.length === 0) body.push(th.fg("dim", "  (no transcript yet)"));
 
-    // 스크롤 적용 (header + footer 1줄 제외).
+    // Apply scroll (excluding header + 1 footer line).
     const viewport = Math.max(2, rows - head.length - 1);
     const maxScroll = Math.max(0, body.length - viewport);
     if (this.scroll > maxScroll) this.scroll = maxScroll;
@@ -1271,7 +1270,7 @@ class SubagentViewer implements Focusable {
   dispose(): void {}
 }
 
-// VIEW_SHORTCUT 같은 raw 키를 사람이 읽기 좋게 (ctrl+\ → Ctrl+\).
+// Make a raw key like VIEW_SHORTCUT human-readable (ctrl+\ → Ctrl+\).
 function formatKeyLabel(key: string): string {
   return key
     .split("+")

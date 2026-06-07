@@ -1,14 +1,14 @@
 // Telegram notification extension.
 //
-// 알림 시점:
-//   - agent_end: 일정 시간(기본 30초) 이상 걸린 작업 완료 시
-//   - goal:status-change: goal이 achieved/blocked/budget-limited 될 때
-//   - questionnaire tool 호출 시: 사용자 입력 대기 알림
+// Notification triggers:
+//   - agent_end: when a task that took at least a certain time (default 30s) completes
+//   - goal:status-change: when a goal becomes achieved/blocked/budget-limited
+//   - when the questionnaire tool is called: notify that user input is awaited
 //
-// 설정: extensions/telegram/.env
+// Config: extensions/telegram/.env
 //   TELEGRAM_BOT_TOKEN=...
 //   TELEGRAM_CHAT_ID=...
-//   TELEGRAM_MIN_SECONDS=30  (선택, 기본 30)
+//   TELEGRAM_MIN_SECONDS=30  (optional, default 30)
 
 import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -46,7 +46,7 @@ function loadConfig(): TelegramConfig | null {
         if (key === "TELEGRAM_MIN_SECONDS") minSeconds = parseInt(value, 10) || 30;
       }
     } catch {
-      // .env 없으면 무시
+      // ignore if there's no .env
     }
   }
 
@@ -69,11 +69,11 @@ async function sendTelegram(config: TelegramConfig, text: string): Promise<void>
       }),
     });
   } catch {
-    // 네트워크 에러는 조용히 무시 (알림 실패가 작업을 막으면 안 됨)
+    // silently ignore network errors (a failed notification must not block the task)
   }
 }
 
-// 텔레그램 API 호출 (결과 파싱). 실패 시 null.
+// Telegram API call (parses the result). Returns null on failure.
 interface InlineButton {
   text: string;
   callback_data: string;
@@ -99,7 +99,7 @@ async function tgCall(
   }
 }
 
-// 메시지 전송 (inline 키보드 선택). message_id 반환.
+// Send a message (with inline keyboard options). Returns message_id.
 async function tgSend(
   config: TelegramConfig,
   text: string,
@@ -111,7 +111,7 @@ async function tgSend(
   return result && typeof result.message_id === "number" ? result.message_id : null;
 }
 
-// 메시지 편집 (버튼 제거 등).
+// Edit a message (e.g. to remove buttons).
 async function tgEdit(config: TelegramConfig, messageId: number, text: string): Promise<void> {
   await tgCall(config, "editMessageText", {
     chat_id: config.chatId,
@@ -122,7 +122,7 @@ async function tgEdit(config: TelegramConfig, messageId: number, text: string): 
   });
 }
 
-// 콜백 쿼리 응답 (버튼 누른 사람에게 토스트).
+// Answer a callback query (toast to the person who pressed the button).
 async function tgAnswerCallback(
   config: TelegramConfig,
   callbackId: string,
@@ -134,7 +134,7 @@ async function tgAnswerCallback(
   });
 }
 
-// 메시지 삭제 (멀티셀렉트에 텍스트 추가 후 사용자 입력 메시지 정리용).
+// Delete a message (used to clean up the user's input message after adding text in multi-select).
 async function tgDelete(config: TelegramConfig, messageId: number): Promise<void> {
   await tgCall(config, "deleteMessage", { chat_id: config.chatId, message_id: messageId });
 }
@@ -142,20 +142,22 @@ async function tgDelete(config: TelegramConfig, messageId: number): Promise<void
 // ─── Extension ─────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // 자식 subagent 프로세스(`pi -p` 로 spawn)에서는 telegram 을 완전히 끕다.
-  // 없으면 subagent 가 끝날 때마다 자식의 agent_end 에 반응해 "Task complete" 알림이
-  // 메인 알림과 이중으로 온다. subagents 익스텐션이 자식 env 에 PI_SUBAGENT=1 을 박는다.
+  // In child subagent processes (spawned via `pi -p`), turn telegram off entirely.
+  // Otherwise, every time a subagent finishes, we'd react to the child's agent_end
+  // and a "Task complete" notification would arrive duplicated with the main one. The
+  // subagents extension sets PI_SUBAGENT=1 in the child env.
   if (process.env.PI_SUBAGENT) return;
 
   const config = loadConfig();
-  if (!config) return; // 설정 없으면 아무것도 안 함
+  if (!config) return; // do nothing if there's no config
 
   let workStartTime = 0;
   let currentCwd = "";
   let currentSessionName = "";
 
-  // pi.events 구독은 reload 시 EventBus 가 재사용되므로 수동으로 해제해야
-  // 리스너가 중복 누적되지 않는다. session_shutdown 에서 일괄 해제.
+  // pi.events subscriptions must be unsubscribed manually because the EventBus is
+  // reused on reload, so listeners don't accumulate as duplicates. Unsubscribe them
+  // all at session_shutdown.
   const unsubs: (() => void)[] = [];
 
   pi.on("session_start", (_event, ctx) => {
@@ -169,7 +171,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // agent_end: 일정 시간 이상이면 알림
+  // agent_end: notify if it took at least the minimum time
   pi.on("agent_end", (_event, ctx) => {
     if (workStartTime === 0) return;
     const elapsed = (Date.now() - workStartTime) / 1000;
@@ -185,7 +187,7 @@ export default function (pi: ExtensionAPI) {
     sendTelegram(config, `✅ *Task complete* (${dur})\n📁 ${project}${session}\n🤖 ${model}`);
   });
 
-  // goal 연동: goal extension이 이벤트를 emit하면 받아서 알림
+  // goal integration: when the goal extension emits an event, receive it and notify
   unsubs.push(
     pi.events.on("goal:status-change", (data) => {
       const { status, objective, note } = data as {
@@ -203,10 +205,12 @@ export default function (pi: ExtensionAPI) {
     }),
   );
 
-  // ── 원격 질문 응답 (question 익스텐션과 pi.events 로 연동) ─────────────
-  // question:ask 를 받으면 텔레그램으로 질문을 보내고(객관식=버튼, 자유입력=답장),
-  // getUpdates 폴링로 응답을 받아 question:answer 로 돌려준다.
-  // 로컬 TUI 가 먼저 답하면 question:resolved 가 와서 정리한다(방식 C: 메시지 편집).
+  // ── Remote question answering (integrated with the question extension via pi.events) ─────
+  // When we receive question:ask, send the question over telegram (multiple-choice =
+  // buttons, free input = reply), poll for the response via getUpdates, and return it
+  // via question:answer.
+  // If the local TUI answers first, question:resolved arrives and we clean up
+  // (method C: edit the message).
   interface QOption {
     value: string;
     label: string;
@@ -221,13 +225,13 @@ export default function (pi: ExtensionAPI) {
   }
   interface AskState {
     askId: string;
-    short: string; // callback_data 용 짧은 id
+    short: string; // short id for callback_data
     questions: QItem[];
-    idx: number; // 현재 질문
-    answersByIdx: Map<number, TgAnswer>; // qIdx -> 답변 (되돌아가 수정 가능)
-    multiSel: Map<number, Set<number>>; // qIdx -> 선택된 옵션 인덱스(멀티셀렉트)
-    customTexts: Map<number, string[]>; // qIdx -> 멀티셀렉트에서 추가한 자유입력들
-    messageId: number | null; // 현재 떠 있는 질문 메시지
+    idx: number; // current question
+    answersByIdx: Map<number, TgAnswer>; // qIdx -> answer (can go back and edit)
+    multiSel: Map<number, Set<number>>; // qIdx -> selected option indices (multi-select)
+    customTexts: Map<number, string[]>; // qIdx -> free-input texts added in multi-select
+    messageId: number | null; // the currently displayed question message
     done: boolean;
   }
   interface TgAnswer {
@@ -251,7 +255,7 @@ export default function (pi: ExtensionAPI) {
     return `📁 ${project}${session}`;
   };
 
-  // 네비게이션 행 (◀ Prev / ▶ Next / ✅ Submit). 멀티 질문일 때만 붙인다.
+  // Navigation row (◀ Prev / ▶ Next / ✅ Submit). Attached only for multi-question sets.
   const navRow = (st: AskState, qIdx: number): InlineButton[] => {
     const row: InlineButton[] = [];
     if (qIdx > 0) row.push({ text: "◀ Prev", callback_data: `p:${st.short}:${qIdx}:0` });
@@ -261,7 +265,7 @@ export default function (pi: ExtensionAPI) {
     return row;
   };
 
-  // 멀티셀렉트 버튼 루에 (토글 상태 + 네비).
+  // Multi-select button rows (toggle state + nav).
   const multiButtons = (st: AskState, qIdx: number): InlineButton[][] => {
     const q = st.questions[qIdx];
     const checked = st.multiSel.get(qIdx) ?? new Set<number>();
@@ -274,7 +278,7 @@ export default function (pi: ExtensionAPI) {
     return buttons;
   };
 
-  // 단일 선택 버튼 루에 (선택된 것 ✓ 표시 + 네비).
+  // Single-select button rows (selected one marked with ✓ + nav).
   const singleButtons = (st: AskState, qIdx: number): InlineButton[][] => {
     const q = st.questions[qIdx];
     const ans = st.answersByIdx.get(qIdx);
@@ -286,7 +290,7 @@ export default function (pi: ExtensionAPI) {
     return buttons;
   };
 
-  // 질문 본문 (진행도 + 현재 답변 상태 표시).
+  // Question body (shows progress + current answer state).
   const questionText = (st: AskState, qIdx: number): string => {
     const q = st.questions[qIdx];
     const n = st.questions.length;
@@ -305,7 +309,7 @@ export default function (pi: ExtensionAPI) {
     return `❓ *Waiting for input*${progress}\n${projectLine()}\n\n*${q.prompt}*${state}${hint}`;
   };
 
-  // 현재 질문을 텔레그램으로 전송/갱신 (단일 메시지 교체).
+  // Send/refresh the current question to telegram (replacing a single message).
   const renderQuestion = async (st: AskState) => {
     const q = st.questions[st.idx];
     if (!q) return;
@@ -325,19 +329,19 @@ export default function (pi: ExtensionAPI) {
     ensurePolling();
   };
 
-  // 지정 인덱스 질문으로 이동 (단일 메시지 교체).
+  // Move to the question at the given index (replacing a single message).
   const goTo = async (st: AskState, idx: number) => {
     st.idx = Math.max(0, Math.min(st.questions.length - 1, idx));
     await renderQuestion(st);
   };
 
-  // 모든 질문이 답변되었는지 확인, 아니면 첫 미답변 인덱스 반환.
+  // Check whether all questions are answered; otherwise return the first unanswered index.
   const firstUnanswered = (st: AskState): number => {
     for (let i = 0; i < st.questions.length; i++) if (!st.answersByIdx.has(i)) return i;
     return -1;
   };
 
-  // 멀티셀렉트의 현재 토글+자유입력을 answersByIdx 에 반영 (선택 없으면 제거).
+  // Reflect the multi-select's current toggles + free input into answersByIdx (remove if nothing selected).
   const syncMultiAnswer = (st: AskState, qIdx: number) => {
     const q = st.questions[qIdx];
     if (!q) return;
@@ -361,7 +365,7 @@ export default function (pi: ExtensionAPI) {
     });
   };
 
-  // 제출: 미답변 있으면 막고 그 질문으로 이동, 아니면 question:answer emit.
+  // Submit: if there are unanswered questions, block and move to that question; otherwise emit question:answer.
   const submitAll = async (st: AskState, cbId: string) => {
     const missing = firstUnanswered(st);
     if (missing >= 0) {
@@ -374,10 +378,10 @@ export default function (pi: ExtensionAPI) {
     const answers = st.questions.map((_, i) => st.answersByIdx.get(i)!).filter(Boolean);
     if (st.messageId != null) await tgEdit(config, st.messageId, "✅ _Submitted. Thanks!_");
     pi.events.emit("question:answer", { askId: st.askId, answers, cancelled: false });
-    // emit 후 question 이 question:resolved 를 돌려주므로 정리는 그곳에서.
+    // After emit, question returns question:resolved, so cleanup happens there.
   };
 
-  // 객관식 단일 선택: 답 저장 후 자동 다음(마지막이면 머문). 단일 질문이면 즉시 제출.
+  // Multiple-choice single select: save the answer then auto-advance (stay if last). If single question, submit immediately.
   const pickSingle = async (st: AskState, qIdx: number, optIdx: number) => {
     const q = st.questions[qIdx];
     const opt = q?.options[optIdx];
@@ -401,10 +405,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (qIdx < st.questions.length - 1) await goTo(st, qIdx + 1);
-    else await renderQuestion(st); // 마지막 질문: 머문며 선택 표시 갱신
+    else await renderQuestion(st); // last question: stay and refresh the selection display
   };
 
-  // 멀티셀렉트 토글.
+  // Multi-select toggle.
   const toggleMulti = async (st: AskState, qIdx: number, optIdx: number, cbId: string) => {
     const set = st.multiSel.get(qIdx) ?? new Set<number>();
     if (set.has(optIdx)) set.delete(optIdx);
@@ -421,9 +425,9 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  // 자유 텍스트 응답.
-  //  - 멀티셀렉트: 선택 목록에 custom 값 추가, answersByIdx 갱신, 머문.
-  //  - 단일: custom 답으로 저장 후 자동 다음(단일 질문이면 즉시 제출).
+  // Free-text response.
+  //  - multi-select: add the custom value to the selection list, refresh answersByIdx, stay.
+  //  - single: save as the custom answer then auto-advance (submit immediately if single question).
   const answerText = async (st: AskState, text: string, srcMsgId?: number) => {
     const q = st.questions[st.idx];
     if (!q) return;
@@ -433,7 +437,7 @@ export default function (pi: ExtensionAPI) {
       arr.push(text);
       st.customTexts.set(qIdx, arr);
       syncMultiAnswer(st, qIdx);
-      // 추가했으면 사용자가 보난 텍스트 메시지는 지워 채팅을 깔끔히 유지.
+      // If something was added, delete the text message the user sent to keep the chat clean.
       if (srcMsgId != null) await tgDelete(config, srcMsgId);
       await renderQuestion(st);
       return;
@@ -453,13 +457,13 @@ export default function (pi: ExtensionAPI) {
     else await renderQuestion(st);
   };
 
-  // 메시지 id 로 ask 찾기 (reply 기반 라우팅용).
+  // Find an ask by message id (for reply-based routing).
   const askByMessageId = (messageId: number): AskState | undefined => {
     for (const st of asks.values()) if (!st.done && st.messageId === messageId) return st;
     return undefined;
   };
 
-  // 대기 중인 ask 개수 (reply 없는 텍스트 폴백 판단용).
+  // Number of pending asks (used to decide the fallback for text without a reply).
   const pendingAsks = (): AskState[] => [...asks.values()].filter((s) => !s.done);
 
   let pollInitialized = false;
@@ -470,8 +474,8 @@ export default function (pi: ExtensionAPI) {
     void pollLoop();
   };
 
-  // 첫 폴링 전에 기존에 쌓인 업데이트(과거 메시지/콜백)를 건너뛴다.
-  // offset:-1 은 마지막 업데이트 1개만 반환 → 그 다음부터 수신.
+  // Before the first poll, skip any updates already accumulated (past messages/callbacks).
+  // offset:-1 returns only the last update → receive from after that.
   const initOffset = async () => {
     if (pollInitialized) return;
     pollInitialized = true;
@@ -497,7 +501,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   const handleUpdate = async (u: Record<string, unknown>) => {
-    // 콜백 쿼리 (버튼)
+    // Callback query (button)
     const cq = u.callback_query as Record<string, unknown> | undefined;
     if (cq) {
       const from = (cq.message as Record<string, unknown>)?.chat as
@@ -538,7 +542,7 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
-    // 일반 메시지 (텍스트 답장)
+    // Regular message (text reply)
     const msg = u.message as Record<string, unknown> | undefined;
     if (msg) {
       const chat = msg.chat as Record<string, unknown> | undefined;
@@ -546,13 +550,13 @@ export default function (pi: ExtensionAPI) {
       const text = typeof msg.text === "string" ? msg.text.trim() : "";
       if (!text || text.startsWith("/")) return;
       const msgId = typeof msg.message_id === "number" ? msg.message_id : undefined;
-      // reply 기반 라우팅만 허용: 특정 질문 메시지에 답장해야 인식한다.
-      // reply 가 없으면 어느 질문인지 알 수 없으므로 무시(안내만).
+      // Only allow reply-based routing: the user must reply to a specific question message to be recognized.
+      // If there's no reply, we can't tell which question it is, so ignore it (just guide).
       const reply = msg.reply_to_message as Record<string, unknown> | undefined;
       const replyId = reply && typeof reply.message_id === "number" ? reply.message_id : undefined;
       if (replyId == null) {
         if (pendingAsks().length > 0) {
-          // 안내 메시지 + 사용자 원본 텍스트를 잠시 뒤 지워 채팅을 깔끔히 유지.
+          // Delete the guide message + the user's original text shortly after to keep the chat clean.
           const noticeId = await tgSend(
             config,
             "❗ To answer with text, *reply* to the specific question message.",
@@ -569,7 +573,7 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  // question:ask — 새 질문 세트 수신.
+  // question:ask — receive a new question set.
   unsubs.push(
     pi.events.on("question:ask", (data) => {
       const payload = data as { askId?: string; questions?: QItem[] };
@@ -593,13 +597,13 @@ export default function (pi: ExtensionAPI) {
     }),
   );
 
-  // question:resolved — 로컬 TUI 가 먼저 답했거나 취소됨. 방식 C 정리.
+  // question:resolved — the local TUI answered first or it was cancelled. Method C cleanup.
   unsubs.push(
     pi.events.on("question:resolved", (data) => {
       const payload = data as { askId?: string };
       const st = payload?.askId ? asks.get(payload.askId) : undefined;
       if (!st) return;
-      // 우리가 emit 해서 끝난 게 아니라면(= 로컬이 이김) 떠있는 메시지를 정리.
+      // If it didn't end because we emitted (= local won), clean up the displayed message.
       if (!st.done && st.messageId != null) {
         void tgEdit(config, st.messageId, "✅ _Answered in terminal. This question is closed._");
       }
@@ -609,7 +613,7 @@ export default function (pi: ExtensionAPI) {
     }),
   );
 
-  // reload/종료 시 구독 해제 (EventBus 가 재사용되므로 리스너 누적 방지).
+  // On reload/shutdown, unsubscribe (the EventBus is reused, so prevent listener accumulation).
   pi.on("session_shutdown", () => {
     for (const off of unsubs.splice(0)) off();
   });

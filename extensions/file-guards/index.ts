@@ -1,31 +1,31 @@
-// file-guards — 항상 켜진 범용 파일 안전 가드. 모든 세션에 적용.
+// file-guards — an always-on, general-purpose file safety guard. Applies to every session.
 //
-// OmO 의 write-existing-file-guard + edit-error-recovery 를 pi 로 이식한다.
-// 둘 다 "AI 의 자기보고를 안 믿고, 위험한 파일 조작을 코드로 막는다"는 정신.
+// Ports OmO's write-existing-file-guard + edit-error-recovery to pi.
+// Both follow the principle of "don't trust the AI's self-report; block dangerous file operations in code."
 //
 // (5) write-existing-file-guard:
-//     `write` 가 "이미 존재하는데 이번 세션에서 읽지 않은" 파일을 통째로 덮어쓰려 하면
-//     tool_call 단계에서 차단한다. 모델이 파일 내용을 모른 채 blind clobber 하는 사고를
-//     막는다. 먼저 read 한 파일이거나, 새 파일이거나, 직전에 우리가 통과시킨 파일이면 허용.
+//     When `write` tries to wholesale overwrite a file that "already exists but hasn't been read this session,"
+//     block it at the tool_call stage. This prevents the model from blind-clobbering a file whose contents it
+//     doesn't know. Allowed if the file was read first, is a new file, or is one we just let through.
 //
 // (6) edit-error-recovery:
-//     `edit` 가 실패(oldText 못 찾음/모호)하면, tool_result 에 "파일을 다시 읽고 정확한
-//     oldText 를 확인한 뒤 재시도하라"는 교정 지침을 덧붙인다. 모델이 같은 실수를 반복하며
-//     토큰을 태우는 걸 줄인다.
+//     When `edit` fails (oldText not found / ambiguous), append a corrective instruction to the tool_result:
+//     "re-read the file, confirm the exact oldText, then retry." This reduces the model burning tokens by
+//     repeating the same mistake.
 //
-// 설치: ~/.pi/agent/extensions/file-guards/ (make install 이 symlink)
+// Install: ~/.pi/agent/extensions/file-guards/ (symlinked by make install)
 
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-  // 이번 세션에서 read(또는 우리가 통과시킨 write/edit 로) 내용을 알게 된 파일 절대경로.
+  // Absolute paths of files whose contents we learned this session (via read, or a write/edit we let through).
   const knownFiles = new Set<string>();
 
   const abs = (cwd: string, p: string): string => (isAbsolute(p) ? p : resolve(cwd, p));
 
-  // 세션이 바뀌면 추적 초기화 (다른 세션의 read 기록이 새지 않게).
+  // Reset tracking when the session changes (so read records from another session don't leak in).
   pi.on("session_start", async () => {
     knownFiles.clear();
   });
@@ -33,35 +33,35 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const cwd = ctx.cwd;
 
-    // read → 그 파일을 "안다"고 기록.
+    // read → record that we "know" that file.
     if (event.toolName === "read") {
       const p = (event.input as { path?: string }).path;
       if (p) knownFiles.add(abs(cwd, p));
       return;
     }
 
-    // edit → 대상 파일도 사실상 내용 인지 상태로 본다(편집하려면 oldText 를 알아야 하므로).
+    // edit → treat the target file as effectively known too (you must know oldText to edit it).
     if (event.toolName === "edit") {
       const p = (event.input as { path?: string }).path;
       if (p) knownFiles.add(abs(cwd, p));
       return;
     }
 
-    // write → 가드.
+    // write → guard.
     if (event.toolName === "write") {
       const p = (event.input as { path?: string }).path;
       if (!p) return;
       const full = abs(cwd, p);
 
-      // 새 파일 생성은 항상 허용.
+      // Creating a new file is always allowed.
       if (!existsSync(full)) {
-        knownFiles.add(full); // 이제 우리가 만든 파일이므로 이후 덮어쓰기 허용.
+        knownFiles.add(full); // It's now a file we created, so allow subsequent overwrites.
         return;
       }
-      // 이미 읽었거나(=내용 인지), 우리가 통과시킨 파일이면 허용.
+      // Allow if already read (= contents known), or if it's a file we let through.
       if (knownFiles.has(full)) return;
 
-      // 존재 + 미인지 → blind clobber 차단.
+      // Exists + not known → block the blind clobber.
       return {
         block: true,
         reason:
@@ -72,7 +72,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // edit 실패 시 교정 지침 주입.
+  // Inject corrective instructions when edit fails.
   pi.on("tool_result", async (event) => {
     if (event.toolName !== "edit" || !event.isError) return;
     const p = (event.input as { path?: string }).path ?? "the file";

@@ -1,33 +1,33 @@
-// btw — Claude Code 의 /btw ("by the way") 사이드 질문 커맨드를 pi 에 이식한 것.
+// btw — a port of Claude Code's /btw ("by the way") side-question command to pi.
 //
-// 동작 개념:
-//   대화 도중 "잠깐, 이거 하나만" 같은 곁가지 질문을 던지고 싶을 때가 있다.
-//   그걸 그냥 보내면 메인 대화 컨텍스트가 그 질답으로 오염되고, 모델이
-//   "확인해볼게요…" 하며 도구를 부르고 턴을 이어가 버린다.
+// Concept:
+//   Sometimes mid-conversation you want to throw in a tangential "hold on, just this one thing" question.
+//   If you just send it, the main conversation context gets polluted by that exchange, and the model
+//   says "let me check…", calls tools, and carries on the turn.
 //
-//   /btw 는 현재 대화 컨텍스트를 "포크" 해서, 도구 없이 단발(single-turn)
-//   질문을 모델에 던지고, 답변을 인라인 오버레이로만 보여준다. 메인 세션·
-//   LLM 컨텍스트에는 질문도 답변도 남지 않는다. 즉 본 대화에 0 의 영향.
+//   /btw "forks" the current conversation context, throws a single-turn question at the model
+//   without tools, and shows the answer only as an inline overlay. Neither the question nor the
+//   answer remains in the main session or LLM context. In other words, zero impact on the conversation.
 //
-// Claude Code 와의 대응:
-//   - 현재 브랜치 전체를 컨텍스트로 사용                  (forkContextMessages)
-//   - 도구 사용 불가 + 단일 응답 강제 (system-reminder)   (canUseTool: deny, maxTurns: 1)
-//   - thinking 끔                                          (maxThinkingTokens: 0)
-//   - 메인 대화 불참                                       (skipCacheWrite, side_question)
+// Correspondence with Claude Code:
+//   - Uses the entire current branch as context              (forkContextMessages)
+//   - No tool use + forced single response (system-reminder)  (canUseTool: deny, maxTurns: 1)
+//   - thinking off                                            (maxThinkingTokens: 0)
+//   - Stays out of the main conversation                      (skipCacheWrite, side_question)
 //
-//   pi 의 complete() 는 애초에 도구 스키마를 전송하지 않으므로, 모델은
-//   도구를 부를 방법 자체가 없다. Claude Code 가 클라이언트단에서 막는 것보다
-//   더 깔끔하게 "도구 없는 단발 응답" 이 된다.
+//   pi's complete() never sends a tool schema to begin with, so the model has
+//   no way to call a tool at all. This is a cleaner "tool-less single response"
+//   than Claude Code blocking it on the client side.
 //
-// 설치: ~/.pi/agent/extensions/btw/index.ts (make install 이 symlink)
+// Install: ~/.pi/agent/extensions/btw/index.ts (make install symlinks it)
 
 import { complete, type Message, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { BorderedLoader, DynamicBorder, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
 
-// 사이드 질문임을 모델에 알리는 system-reminder. Claude Code 의 원문을 거의 그대로
-// 옮겼다. 핵심은 "도구 없음 · 단일 응답 · 추측 금지".
+// system-reminder that tells the model this is a side question. Carried over almost
+// verbatim from Claude Code's original. The key points are "no tools · single response · no guessing".
 const SIDE_QUESTION_REMINDER = [
   "<system-reminder>This is a side question from the user. You must answer this question directly in a single response.",
   "",
@@ -41,12 +41,12 @@ const SIDE_QUESTION_REMINDER = [
   "Simply answer the question with the information you have.</system-reminder>",
 ].join("\n");
 
-// ─── 컨텍스트 포크 ───────────────────────────────────────────────────────────
+// ─── Context fork ───────────────────────────────────────────────────────────
 
-// 현재 브랜치의 실제 메시지 배열을 그대로 포크한다 (Claude Code 의
-// forkContextMessages). 평탄화하지 않고 user/assistant/toolResult 메시지를
-// 원형 그대로 복사해 넘긴다 — 모델은 진짜 대화 흐름을 그대로 본다.
-// 메시지는 deep copy 해서 메인 세션 객체를 건드리지 않는다.
+// Fork the current branch's actual message array as-is (Claude Code's
+// forkContextMessages). Copies user/assistant/toolResult messages in their
+// original form without flattening — the model sees the real conversation flow as-is.
+// The messages are deep-copied so the main session objects aren't touched.
 function forkContextMessages(ctx: ExtensionCommandContext): Message[] {
   const branch = ctx.sessionManager.getBranch();
   const messages: Message[] = [];
@@ -57,7 +57,7 @@ function forkContextMessages(ctx: ExtensionCommandContext): Message[] {
   return messages;
 }
 
-// ─── 결과 오버레이 ───────────────────────────────────────────────────────────
+// ─── Result overlay ───────────────────────────────────────────────────────────
 
 async function showAnswer(
   question: string,
@@ -65,7 +65,7 @@ async function showAnswer(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   if (!ctx.hasUI) return;
-  // pi-gui/pi-web: 터미널 오버레이 대신 호스트 어댑터로 마크다운 답변을 보여준다.
+  // pi-gui/pi-web: instead of a terminal overlay, show the markdown answer via the host adapter.
   const webUi = ctx.ui as unknown as { showBtw?: (q: string, a: string) => Promise<void> };
   if (process.env.PI_WEB_HOST && typeof webUi.showBtw === "function") {
     await webUi.showBtw(question, answer);
@@ -117,8 +117,8 @@ export default function (pi: ExtensionAPI) {
 
       const contextMessages = forkContextMessages(ctx);
 
-      // 사이드 질문: 포크한 대화 메시지 배열 뒤에 system-reminder + 질문을
-      // 마지막 user 메시지로 붙인다. 대화 흐름은 그대로 유지된다.
+      // Side question: append the system-reminder + question after the forked
+      // conversation message array, as the final user message. The conversation flow is preserved.
       const sideQuestion: UserMessage = {
         role: "user",
         content: [{ type: "text", text: `${SIDE_QUESTION_REMINDER}\n\n${question}` }],
@@ -126,7 +126,7 @@ export default function (pi: ExtensionAPI) {
       };
       const forkedMessages: Message[] = [...contextMessages, sideQuestion];
 
-      // 단발 LLM 호출 헬퍼 (도구 없는 단발 응답).
+      // Single-shot LLM call helper (tool-less single response).
       const runComplete = async (signal?: AbortSignal): Promise<string | null> => {
         const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
         if (!auth.ok) throw new Error(auth.error);
@@ -144,7 +144,7 @@ export default function (pi: ExtensionAPI) {
           .trim();
       };
 
-      // pi-gui/pi-web: 터미널 로더(custom)를 못 그린다. 직접 호출하고 토스트로 진행 표시.
+      // pi-gui/pi-web: can't draw the terminal loader (custom). Call directly and show progress with a toast.
       let answer: string | null;
       if (process.env.PI_WEB_HOST) {
         ctx.ui.notify(`Asking ${ctx.model.id} (side question)…`, "info");
@@ -155,7 +155,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
       } else {
-        // 진행 표시 + 단발 호출. Esc 로 취소.
+        // Progress display + single-shot call. Cancel with Esc.
         answer = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
           const loader = new BorderedLoader(
             tui,
@@ -173,8 +173,8 @@ export default function (pi: ExtensionAPI) {
               throw new Error(`No API key for ${ctx.model!.provider}`);
             }
 
-            // complete() 는 도구 스키마를 전송하지 않는다 → 도구 없는 단발 응답.
-            // reasoning "off" 로 thinking 도 끈다 (Claude Code 의 maxThinkingTokens: 0).
+            // complete() doesn't send a tool schema → tool-less single response.
+            // reasoning "off" also turns off thinking (Claude Code's maxThinkingTokens: 0).
             const response = await complete(
               ctx.model!,
               { messages: forkedMessages },

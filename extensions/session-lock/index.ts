@@ -1,31 +1,31 @@
-// pi (TUI/CLI) 측 세션 락 extension.
+// Session lock extension for the pi (TUI/CLI) side.
 //
-// 역할:
-//   - 세션이 열리면(session_start) 그 세션 파일에 배타 락을 건다.
-//   - "매번 메시지/툴 실행 직전에 락이 나한테 있는지" 확인한다.
-//       내 락이면 통과. 내 락이 아니면(누가 탈취했거나 락이 사라짐) 차단 + 읽기전용 강등.
-//   - 세션이 닫히면(session_shutdown) 락을 푼다.
+// Responsibilities:
+//   - When a session opens (session_start), place an exclusive lock on that session file.
+//   - Before every message/tool execution, check whether the lock is still mine.
+//       If it's my lock, proceed. If it's not (someone took it over or the lock vanished), block + downgrade to read-only.
+//   - When the session closes (session_shutdown), release the lock.
 //
-// 이 extension 이 pi-web 과 "같은 규약(SessionLock)"을 쓰기 때문에,
-// TUI 에서 연 세션을 pi-web 이 인식하고, 그 반대도 성립한다.
+// Because this extension uses the "same protocol (SessionLock)" as pi-web,
+// pi-web recognizes a session opened in the TUI, and vice versa.
 //
-// 설치: ~/.pi/agent/extensions/session-lock/index.ts
-//       (이 파일과 shared/session-lock.ts 를 함께 배치하거나, 빌드시 인라인)
+// Install: ~/.pi/agent/extensions/session-lock/index.ts
+//       (place this file alongside shared/session-lock.ts, or inline it at build time)
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type LockRecord, SessionLock } from "./shared/session-lock.ts";
 
 export default function (pi: ExtensionAPI) {
-  // 자식 subagent 프로세스(`pi -p`, ꈁ리 세션)에서는 세션락을 걸지 않는다.
-  // 자식은 ~/.pi/agent/.subagent-sessions/ ꈁ리 디렉터리에서 돌아 웹이나 다른 TUI 가
-  // 그 세션을 잡을 일이 없다. 락은 불필요한 락 파일 노이즈만 남긴다.
-  // subagents 익스텐션이 자식 env 에 PI_SUBAGENT=1 을 박는다.
+  // Don't apply a session lock in child subagent processes (`pi -p`, subagent sessions).
+  // Children run in the ~/.pi/agent/.subagent-sessions/ directory, so the web or another TUI
+  // will never grab that session. The lock would only leave unnecessary lock-file noise.
+  // The subagents extension sets PI_SUBAGENT=1 in the child env.
   if (process.env.PI_SUBAGENT) return;
 
-  // pi-web/pi-gui 호스트가 띄운 런타임에서는 호스트가 이미 SessionLock 을 직접
-  // 관리한다(owner="pi-web"). 그때 이 익스텐션까지 또 같은 파일에 락을 걸면
-  // 두 홀더가 생겨서, 정작 그 런타임의 tool 을 "held elsewhere" 로 차단하는
-  // 자가당착에 빠진다. 호스트가 PI_WEB_HOST=1 을 박으면 여기서 빠진다.
+  // In a runtime launched by a pi-web/pi-gui host, the host already manages the
+  // SessionLock directly (owner="pi-web"). If this extension also locks the same file,
+  // there would be two holders, leading to the self-contradiction of blocking that
+  // runtime's own tools as "held elsewhere". When the host sets PI_WEB_HOST=1, bail out here.
   if (process.env.PI_WEB_HOST) return;
 
   let lock: SessionLock | null = null;
@@ -33,7 +33,7 @@ export default function (pi: ExtensionAPI) {
   const fmtOwner = (r?: LockRecord) =>
     r ? `${r.label || r.owner} (pid ${r.pid}${r.host ? ` @ ${r.host}` : ""})` : "unknown";
 
-  // footer 의 다른 텍스트(cwd/토큰/모델)는 모두 dim 색이라 거기 맞춘다.
+  // The other footer text (cwd/tokens/model) is all dim-colored, so match that.
   const setLockStatus = (
     ctx: {
       ui: {
@@ -44,10 +44,10 @@ export default function (pi: ExtensionAPI) {
     text: string,
   ) => ctx.ui.setStatus("session-lock", ctx.ui.theme.fg("dim", text));
 
-  // 세션 열림: 락 시도
+  // Session opened: try to acquire the lock
   pi.on("session_start", async (_event, ctx) => {
     const path = ctx.sessionManager.getSessionFile();
-    if (!path) return; // ephemeral 세션은 파일이 없어 락 불필요
+    if (!path) return; // ephemeral sessions have no file, so no lock is needed
 
     const name = ctx.sessionManager.getSessionName?.();
     lock = new SessionLock(path, "pi", name ? `TUI: ${name}` : "TUI");
@@ -58,7 +58,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // 이미 다른 쪽(다른 TUI / pi-web)이 점유 중.
+    // Already held by another side (another TUI / pi-web).
     setLockStatus(ctx, "🔒 read-only (locked elsewhere)");
     const force = ctx.hasUI
       ? await ctx.ui.confirm(
@@ -84,9 +84,9 @@ export default function (pi: ExtensionAPI) {
     if (!lock) return;
     // Let extension-injected messages through; only guard real user input.
     if (event.source === "extension") return;
-    if (lock.isMine()) return; // 통과
+    if (lock.isMine()) return; // proceed
 
-    // 내 락이 아니다 — 한번도 안 잡았거나(read-only), 잡았다가 잃었거나(lost).
+    // It's not my lock — either never acquired (read-only) or acquired and then lost.
     const st = lock.state();
     if (st.state === "lost" && st.record) {
       setLockStatus(ctx, "🔒 lost (taken over)");
@@ -101,7 +101,7 @@ export default function (pi: ExtensionAPI) {
     return { action: "handled" as const }; // consume input → not sent to agent
   });
 
-  // 도구 실행 직전에도 동일 가드 (파일 변경 도구 보호)
+  // Same guard right before tool execution (protects file-modifying tools)
   pi.on("tool_call", async (_event, _ctx) => {
     if (!lock) return;
     if (!lock.isMine()) {
@@ -109,7 +109,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // /takeover 수동 명령
+  // /takeover manual command
   pi.registerCommand("takeover", {
     description: "Force-take this session lock (downgrade the other side to read-only)",
     handler: async (_args, ctx) => {
@@ -125,7 +125,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // 세션 닫힘: 락 해제
+  // Session closed: release the lock
   pi.on("session_shutdown", async (_event, _ctx) => {
     lock?.release();
     lock = null;
