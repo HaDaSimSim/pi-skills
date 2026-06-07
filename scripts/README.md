@@ -56,3 +56,32 @@ check-extensions.py EXT_DIR [EXT_DIR ...]
 Exit code is tsc's (0 clean, non-zero on type errors). Requires `node`, `npm`,
 and `npx` on `PATH` — the same toolchain pi itself needs. Invoked by the
 lefthook pre-push hook and the root `pnpm run typecheck` script.
+
+## check-commit-msg.py
+
+Enforces [Conventional Commits v1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
+on the commit message header. Invoked by the lefthook `commit-msg` hook with
+the path to git's commit-message file:
+
+```bash
+# Validate the header of a commit message file.
+check-commit-msg.py <path-to-commit-msg-file>
+```
+
+The header (first non-blank, non-comment line) must match:
+
+```
+<type>[(scope)][!]: <description>
+```
+
+- **type** — one of `feat`, `fix`, `build`, `chore`, `ci`, `docs`, `perf`,
+  `refactor`, `revert`, `style`, `test` (lowercase).
+- **(scope)** — optional, non-empty.
+- **!** — optional, flags a breaking change.
+- **`: `** — literal colon + single space separator.
+- **description** — non-empty.
+
+Git-generated messages (`Merge `, `Revert `, `fixup! `, `squash! `, `amend! `)
+are skipped. Exit 0 on a conforming message, 1 otherwise with an actionable
+explanation on stderr; stdout is left empty. stdlib only — needs `python3` on
+`PATH`.

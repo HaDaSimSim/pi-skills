@@ -2,6 +2,11 @@
 # Install once with `pnpm install` (runs `lefthook install` via the prepare script).
 # Docs: https://lefthook.dev
 
+commit-msg:
+  jobs:
+    - name: conventional-commits
+      run: ./scripts/check-commit-msg.py {1}
+
 pre-commit:
   parallel: true
   jobs:
