@@ -20,6 +20,7 @@ link dangles.
 | `stats` | Full-screen usage dashboard (ports opencode's `stats`) — per-session and global token/cost aggregation from session jsonl, read-only with zero LLM-context impact. | `/stats` |
 | `subagents` | Background async multi-subagent runner — spawns concurrent child `pi` processes, persists transcripts, injects only final outputs back. | `spawn_subagents`/`list_subagents`/`fetch_subagent_result`/`send_to_subagent` tools, `ctrl+\` viewer |
 | `telegram` | Telegram push notifications on long-task completion, goal status changes, and when user input is requested. | — |
+| `todo` | Agent task-list tracker (ports Claude Code's TodoWrite) — the model manages a structured checklist; while working, in-progress/remaining items show in a widget right under the "Working… Ns" line, plus an always-on `n/N todos` footer count. Session-persisted, restored on reload. | `todo_write`/`todo_read` tools, `/todo` (`clear`) |
 | `ui-cosmetics` | Footer customization (token counts, auto-compaction marker, stats/model/branch lines) plus a live "Working… 3s" timer and per-turn model+duration meta. | — |
 
 ## Config / env

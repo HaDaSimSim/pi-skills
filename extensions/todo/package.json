@@ -1,0 +1,14 @@
+{
+  "name": "pi-ext-todo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "../../scripts/check-extensions.py ."
+  }
+}
