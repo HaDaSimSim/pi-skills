@@ -102,6 +102,12 @@ interface TranscriptItem {
   kind: "thinking" | "text" | "toolCall" | "toolResult";
   text: string;
   toolName?: string;
+  // GUI-only optional fields. The terminal overlay renders `text` (a compact
+  // summary); these carry the full data so rich web renderers (pi-gui) can show
+  // complete tool calls. They are ignored by the terminal and safe to omit.
+  args?: Record<string, unknown>; // full tool-call arguments (toolCall only)
+  isError?: boolean; // tool result error flag (toolResult only)
+  fullText?: string; // untruncated result text (toolResult only)
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -203,6 +209,7 @@ export function flattenAssistant(msg: AssistantMessage): TranscriptItem[] {
         kind: "toolCall",
         text: sanitizeForRender(formatToolCallArgs(c.name, c.arguments ?? {})),
         toolName: c.name,
+        args: c.arguments ?? {},
       });
   }
   return items;
@@ -353,6 +360,8 @@ export function runSubagentTurn(
             kind: "toolResult",
             text: sanitizeForRender(text.length > 500 ? `${text.slice(0, 500)}…` : text),
             toolName: tr.toolName,
+            isError: tr.isError,
+            fullText: sanitizeForRender(text),
           });
         }
         run.finalOutput = finalOutputFrom(turn.transcript);
