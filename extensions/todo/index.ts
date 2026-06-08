@@ -103,6 +103,23 @@ const MARK: Record<TodoStatus, string> = {
   completed: "[x]",
 };
 
+// The color names accepted by theme.fg, derived from the theme's own signature so
+// we don't have to re-declare the ThemeColor union here.
+type ThemeColor = Parameters<NonNullable<ExtensionContext["ui"]>["theme"]["fg"]>[0];
+
+// Non-TUI hosts (e.g. pi-gui) have no ctx.ui.theme even when hasUI is true
+// (theme.fg depends on the TUI initTheme). Fall back to the raw text, uncolored.
+const paint = (ctx: ExtensionContext, color: ThemeColor, text: string): string => {
+  const theme = ctx.ui?.theme;
+  return theme ? theme.fg(color, text) : text;
+};
+
+// Same guard for strikethrough: return the raw label when no TUI theme is present.
+const strike = (ctx: ExtensionContext, text: string): string => {
+  const theme = ctx.ui?.theme;
+  return theme ? theme.strikethrough(text) : text;
+};
+
 export default function (pi: ExtensionAPI) {
   let todos: TodoItem[] = [];
   // Whether the agent is currently working (turn_start ~ agent_end). The widget
@@ -125,28 +142,27 @@ export default function (pi: ExtensionAPI) {
   // The markers are ASCII (`[ ] [~] [x]`), so their width is uniform regardless of
   // terminal and the alignment stays correct.
   const widgetLines = (ctx: ExtensionContext): string[] => {
-    const theme = ctx.ui.theme;
     const sorted = sortForDisplay(todos);
     const shown = sorted.slice(0, MAX_WIDGET_ITEMS);
 
     // Header: "n/N todos" (no indentation, distinct from the body below).
     const done = doneCount(todos);
-    const header = theme.fg("dim", `${done}/${todos.length} todos`);
+    const header = paint(ctx, "dim", `${done}/${todos.length} todos`);
 
     const items = shown.map((t) => {
       const label = labelOf(t);
       // Items are indented one level deeper than the header, with 1 space after the marker.
       if (t.status === "completed") {
-        return `  ${theme.fg("success", MARK.completed)} ${theme.fg("muted", theme.strikethrough(label))}`;
+        return `  ${paint(ctx, "success", MARK.completed)} ${paint(ctx, "muted", strike(ctx, label))}`;
       }
       if (t.status === "in_progress") {
-        return `  ${theme.fg("accent", MARK.in_progress)} ${label}`;
+        return `  ${paint(ctx, "accent", MARK.in_progress)} ${label}`;
       }
-      return `  ${theme.fg("muted", MARK.pending)} ${theme.fg("muted", label)}`;
+      return `  ${paint(ctx, "muted", MARK.pending)} ${paint(ctx, "muted", label)}`;
     });
 
     const hidden = sorted.length - shown.length;
-    if (hidden > 0) items.push(theme.fg("muted", `  …and ${hidden} more`));
+    if (hidden > 0) items.push(paint(ctx, "muted", `  …and ${hidden} more`));
     // Header at the top + body + two blank lines below.
     return [header, ...items, "", ""];
   };
@@ -161,8 +177,8 @@ export default function (pi: ExtensionAPI) {
     const done = doneCount(todos);
     const complete = done === todos.length;
     // The n/N count is colored based on completion; the word "todos" is always dim.
-    const count = ctx.ui.theme.fg(complete ? "success" : "muted", `${done}/${todos.length}`);
-    ctx.ui.setStatus(STATUS_KEY, `${count} ${ctx.ui.theme.fg("dim", "todos")}`);
+    const count = paint(ctx, complete ? "success" : "muted", `${done}/${todos.length}`);
+    ctx.ui.setStatus(STATUS_KEY, `${count} ${paint(ctx, "dim", "todos")}`);
   };
 
   // If working and there are unfinished items remaining, refresh the detail widget;
@@ -196,7 +212,7 @@ export default function (pi: ExtensionAPI) {
     if (todos.length === 0) return "No todos.";
     const lines = todos.map((t) => `${MARK[t.status]} ${labelOf(t)}`);
     lines.push("");
-    lines.push(ctx.ui.theme.fg("muted", `${doneCount(todos)}/${todos.length} completed`));
+    lines.push(paint(ctx, "muted", `${doneCount(todos)}/${todos.length} completed`));
     return lines.join("\n");
   };
 
