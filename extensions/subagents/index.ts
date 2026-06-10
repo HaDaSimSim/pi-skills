@@ -476,6 +476,37 @@ export default function (pi: ExtensionAPI) {
   const runs = new Map<string, SubagentRun>();
   // AbortController for the running run. abort_subagent calls this to kill the child.
   const controllers = new Map<string, AbortController>();
+  // Set once the host has invalidated this extension's session (reload/switch/dispose).
+  // A child process is detached from the session lifecycle and keeps streaming after
+  // the host tears the runtime down (e.g. pi-gui's idle reap or tab close). Any deferred
+  // host write (appendEntry/sendUserMessage/events.emit) from that orphan would hit a
+  // stale extension runner and throw, surfacing as an uncaughtException on the host.
+  // Once stale, stop touching the host and kill every child so they stop emitting.
+  let stale = false;
+
+  // Abort every running child. Used on session_shutdown and when a stale host write is
+  // detected, so detached children don't keep writing into a dead runtime.
+  const killAllChildren = () => {
+    for (const c of controllers.values()) c.abort();
+  };
+
+  // Run a host-touching side effect (appendEntry/sendUserMessage/events.emit) defensively.
+  // If the runner was invalidated, swallow the throw, mark stale, and stop the children
+  // instead of letting it bubble to the host as an uncaughtException.
+  const withHost = (fn: () => void) => {
+    if (stale) return;
+    try {
+      fn();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/stale after session replacement or reload/.test(msg)) {
+        stale = true;
+        killAllChildren();
+        return;
+      }
+      throw e;
+    }
+  };
   // Queue of pending follow-up prompts for a running run (steering). Consumed in order when the current turn ends.
   const pendingFollowUps = new Map<string, string[]>();
   // steer request: abort the current turn and immediately start a new turn with this message.
@@ -485,17 +516,23 @@ export default function (pi: ExtensionAPI) {
 
   // Refresh the progress widget
   const updateWidget = (ctx: ExtensionContext) => {
+    if (stale) return; // host invalidated: ctx.hasUI/theme would throw, and there is nothing to update
     const all = [...runs.values()];
     const running = all.filter((r) => r.status === "running").length;
     // Emit the running count on a shared bus so other extensions (especially the goal loop) can
     // "hold continuation while background subagents are running".
     // Always emit regardless of whether there is a UI (won't reach print-mode children due to the PI_SUBAGENT guard).
+    withHost(() => pi.events.emit("subagents:running", { running }));
+    let hasUI: boolean;
     try {
-      pi.events.emit("subagents:running", { running });
+      hasUI = ctx.hasUI;
     } catch {
-      /* bus not yet initialized: ignore */
+      // ctx access throws once the runner is stale (detached child after host teardown).
+      stale = true;
+      killAllChildren();
+      return;
     }
-    if (!ctx.hasUI) return;
+    if (!hasUI) return;
     // If there is at least one run, expose the viewer shortcut hint in the footer.
     // rawKeyHint / ctx.ui.theme depend on the TUI theme (initTheme). Non-TUI hosts like pi-web
     // have no theme even when hasUI=true, so they throw — guard the whole thing.
@@ -519,8 +556,9 @@ export default function (pi: ExtensionAPI) {
   };
 
   // Persist a run to the session (custom entry = not in the LLM context). Overwritten on each state change.
+  // Guarded: a detached child can call this after the host invalidated the runtime.
   const persistRun = (run: SubagentRun) => {
-    pi.appendEntry(RUN_ENTRY_TYPE, run as unknown as Record<string, unknown>);
+    withHost(() => pi.appendEntry(RUN_ENTRY_TYPE, run as unknown as Record<string, unknown>));
   };
 
   // Execute one turn (shared by the initial task and follow-ups). When done, mark it as an unread
@@ -629,9 +667,14 @@ export default function (pi: ExtensionAPI) {
         `Call fetch_subagent_result with subagentId "${run.runId}" for details.`;
     }
     const deliverAs = run.status === "done" && !aborted ? "followUp" : "steer";
-    pi.sendUserMessage(
-      `[subagent ${run.runId} ${status}] ${note}`,
-      ctx.isIdle() ? undefined : { deliverAs },
+    // Guarded: both ctx.isIdle() and pi.sendUserMessage hit the runner, which throws
+    // once the host has invalidated this session. A detached child reaching here after
+    // teardown must not crash the host — withHost swallows it and stops the children.
+    withHost(() =>
+      pi.sendUserMessage(
+        `[subagent ${run.runId} ${status}] ${note}`,
+        ctx.isIdle() ? undefined : { deliverAs },
+      ),
     );
     updateWidget(ctx);
   };
@@ -1054,6 +1097,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── Session restore: load subagent-run entries from disk into memory ──────────────────────
   pi.on("session_start", async (_event, ctx) => {
+    stale = false; // fresh (or resumed) session: the runner is live again
     runs.clear();
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type === "custom" && entry.customType === RUN_ENTRY_TYPE) {
@@ -1076,6 +1120,15 @@ export default function (pi: ExtensionAPI) {
       }
     }
     updateWidget(ctx);
+  });
+
+  // Host is tearing down or replacing this session (reload/switch/dispose). Detached child
+  // processes are not bound to the session lifecycle, so kill them now; otherwise an orphan
+  // keeps streaming and its deferred persistRun/notify would hit the invalidated runner.
+  // Mark stale so any in-flight callback that races past the kill is swallowed by withHost.
+  pi.on("session_shutdown", () => {
+    stale = true;
+    killAllChildren();
   });
 }
 
