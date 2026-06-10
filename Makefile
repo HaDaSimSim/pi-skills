@@ -17,7 +17,7 @@ ALL_SKILLS     := ast-grep context7 grep-search update-models websearch
 # Extensions are TypeScript files or directories under `extensions/`. Each
 # entry here must match either `extensions/<name>.ts` or `extensions/<name>/`
 # (a directory containing `index.ts` or a `package.json` with `pi.extensions`).
-ALL_EXTENSIONS := session-lock ui-cosmetics question goal telegram subagents btw stats file-guards todo
+ALL_EXTENSIONS := session-lock ui-cosmetics question goal telegram subagents btw stats file-guards todo async-bash
 LOCAL_CFG      := skills.local.json
 
 # Compute disabled set per category. Each call shells out to the helper

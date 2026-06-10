@@ -12,6 +12,7 @@ link dangles.
 
 | Extension | What it does | Adds |
 |---|---|---|
+| `async-bash` | Runs long shell commands in the background (detached) and pings the main agent on exit instead of blocking the turn or polling with `sleep`. Same "fire and forget, get notified when done" model as `subagents`. Output streams to a temp log + capped inline buffer; jobs are session-persisted. | `bash_async`/`bash_jobs`/`bash_output`/`bash_abort` tools, `ctrl+b` viewer |
 | `btw` | One-off "by the way" side question with full conversation context but zero effect on the main session (ports Claude Code's `/btw`). | `/btw <question>` |
 | `file-guards` | Always-on file-safety guards: blocks `write` from clobbering an existing file not read this session, and appends recovery guidance when an `edit` fails to match. | — |
 | `goal` | Autonomous goal loop (Ralph loop, ports Codex CLI's `/goal`) — pins a durable objective and re-injects continuation prompts each turn until done/blocked. | `/goal <objective>` (`pause`/`resume`/`clear`/`status`, `--budget N`, `--no-block`) |
