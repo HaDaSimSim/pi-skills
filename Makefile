@@ -13,11 +13,11 @@ BIN_DIR := bin
 #
 # Names are flat across skills and extensions. Anything missing from the
 # file defaults to enabled. The file is gitignored.
-ALL_SKILLS     := ast-grep context7 grep-search update-models websearch
+ALL_SKILLS     := apple-docs ast-grep context7 grep-search update-models update-models-afin websearch
 # Extensions are TypeScript files or directories under `extensions/`. Each
 # entry here must match either `extensions/<name>.ts` or `extensions/<name>/`
 # (a directory containing `index.ts` or a `package.json` with `pi.extensions`).
-ALL_EXTENSIONS := session-lock ui-cosmetics question goal telegram subagents btw stats file-guards todo async-bash
+ALL_EXTENSIONS := session-lock ui-cosmetics question goal telegram subagents btw stats file-guards todo async-bash toolcall-nudge browser-control
 LOCAL_CFG      := skills.local.json
 
 # Compute disabled set per category. Each call shells out to the helper
