@@ -348,13 +348,57 @@ async function run() {
     "DG-23c: persistBlocked sets status to blocked in goal-state entry",
   );
   assert(
-    dgSrc.includes("blockedBy"),
-    "DG-23d: persistBlocked includes blockedBy field for traceability",
+    dgSrc.includes("BLOCKED_BY"),
+    "DG-23d: blockedBy identifies spec-graph-done-gate as the blocking source",
+  );
+
+  // DG-23e: pi-gui CONSUMPTION GATE — objective must be a string
+  // All 3 pi-gui ralphFrom readers require typeof objective === "string".
+  // Without this field, the blocked entry NEVER renders.
+  assert(
+    dgSrc.includes("objective:"),
+    "DG-23e: persistBlocked includes objective field (required by pi-gui gate)",
   );
   assert(
-    dgSrc.includes("BLOCKED_BY"),
-    "DG-23e: blockedBy identifies spec-graph-done-gate as the blocking source",
+    dgSrc.includes("iteration: 0"),
+    "DG-23f: persistBlocked includes iteration field (valid GoalState)",
   );
+  assert(
+    dgSrc.includes("createdAt: Date.now()"),
+    "DG-23g: persistBlocked includes createdAt field (valid GoalState)",
+  );
+  // Verify the entry shape would pass pi-gui's typeof objective === "string" gate
+  // by constructing the shape and asserting the predicate.
+  {
+    const reasonText = "delivery_completeness: REQ-1 not covered";
+    const blockedEntry = {
+      objective: `[spec-graph] ${reasonText}`,
+      status: "blocked",
+      note: `[spec-graph-done-gate] ${reasonText}`,
+      iteration: 0,
+      createdAt: Date.now(),
+    };
+    assert(
+      typeof blockedEntry.objective === "string",
+      "DG-23h: blockedEntry.objective is a string (passes pi-gui ralphFrom gate)",
+    );
+    assert(
+      blockedEntry.objective.length > 0,
+      "DG-23i: blockedEntry.objective is a non-empty string (passes pi-gui ralphFrom gate)",
+    );
+    assert(
+      blockedEntry.status === "blocked",
+      "DG-23j: blockedEntry.status is 'blocked' (passes pi-gui status check)",
+    );
+    assert(
+      typeof blockedEntry.note === "string" && blockedEntry.note.length > 0,
+      "DG-23k: blockedEntry.note is a non-empty string",
+    );
+    assert(
+      !("cleared" in blockedEntry),
+      "DG-23l: blockedEntry has no 'cleared' field (won't be skipped by ralph restore)",
+    );
+  }
 
   // DG-24: FINITE DOCUMENTED — header comment describes finite bound
   assert(

@@ -185,21 +185,27 @@ function emitBlocked(pi: ExtensionAPI, reason: string, retryCount: number): void
 // When the gate reaches MAX_RETRIES and stops re-driving, the blocked state
 // MUST survive session restore so the GUI (which reads persisted goal-state
 // entries) shows "blocked" on cold-browse. We append a goal-state entry
-// matching ralph-loop's STATE_ENTRY_TYPE schema. The entry has status+note
-// but NO objective, so ralph-loop's restore skips it (doesn't overwrite
-// the active goal) while the GUI can still read the blocked status.
+// matching ralph-loop's GoalState schema. The pi-gui reads (3 paths:
+// gui-state-extension.ts ralphFrom:111, runtime-manager.ts:399,
+// use-session.ts ralphFromEntries:390) ALL require typeof objective==="string",
+// so we include a meaningful objective field. The entry is a full GoalState:
+// {objective, status:"blocked", note, iteration:0, createdAt}.
+//
+// ralph-loop's session_start restore is last-wins across all goal-state
+// entries. If this blocked entry is the last one, ralph will restore a
+// blocked goal — harmless (decide() skips non-pursuing, user can /goal clear).
+// If the user has an active ralph goal, the last-appended entry wins.
 
 const BLOCKED_BY = "spec-graph-done-gate";
 
 function persistBlocked(pi: ExtensionAPI, reasons: string[]): void {
-  const note =
-    reasons.length > 0
-      ? `[${BLOCKED_BY}] ${reasons[0]}`
-      : `[${BLOCKED_BY}] graph has unmet validation items`;
+  const reasonText = reasons.length > 0 ? reasons[0] : "graph has unmet validation items";
   pi.appendEntry("goal-state", {
+    objective: `[spec-graph] ${reasonText}`,
     status: "blocked",
-    note,
-    blockedBy: BLOCKED_BY,
+    note: `[${BLOCKED_BY}] ${reasonText}`,
+    iteration: 0,
+    createdAt: Date.now(),
   } as unknown as Record<string, unknown>);
 }
 
