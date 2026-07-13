@@ -16,14 +16,7 @@
 //
 // Install: ~/.pi/agent/extensions/ultrawork/index.ts (make install symlinks it)
 
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // ── Cross-extension wiring (task 27) ─────────────────────────────────────────
@@ -221,7 +214,7 @@ Each scenario MUST specify, upfront:
 
 ### Durable Notepad (survives context loss)
 
-Run once at start: \`NOTE=$(mktemp -t ulw-$(date +%Y%m%d-%H%M%S).XXXXXX.md)\`. Echo the path. Initialise with these sections and APPEND (never rewrite) as you work:
+Your durable notepad is auto-created under \`.ohpi/notepad/ulw-<ts>.md\` when ultrawork starts; its path is recorded and restored across reload/compaction. APPEND (never rewrite) these sections as you work:
 
 \`\`\`
 # Ultrawork Notepad — <one-line goal>
@@ -443,9 +436,15 @@ function persist(pi: ExtensionAPI): void {
 //
 // On ultrawork activation, a markdown notepad file is created under
 // .ohpi/notepad/ulw-<timestamp>.md (preferred home per State & VC policy).
-// Falls back to mktemp if no .ohpi root is available. The path is persisted
-// via appendEntry("ulw-notepad", {path, cwd, ...}) and restored on
-// session_start so the working memory survives reload/compaction.
+// Falls back to .ohpi/ root if the notepad subdir is unavailable. NEVER
+// writes outside .ohpi/. If .ohpi/ root itself is unavailable, the notepad
+// is a clean no-op. The path is persisted via appendEntry("ulw-notepad",
+// {path, cwd, ...}) and restored on session_start so the working memory
+// survives reload.
+//
+// Compaction re-read: a session_compact listener re-flags needsReRead so the
+// context hook re-injects the notepad re-read instruction after compaction,
+// ensuring working memory survives context loss (task 15).
 //
 // Entry type "ulw-notepad" is distinct from "ultrawork" (active-state flag)
 // and "todo-list" (todo extension, task 21). No collision.
@@ -481,13 +480,13 @@ function makeTimestamp(): string {
 
 /**
  * Create the notepad file under .ohpi/notepad/ (preferred home).
- * Falls back to CI_HOME (process.env.CI_HOME, if set) or to a
- * temp dir if .ohpi root is unavailable (no project cwd).
+ * If that fails, falls back to the .ohpi/ root directory. Never writes
+ * outside .ohpi/ — all project state lives under .ohpi per State & VC policy.
+ * Returns null if even .ohpi/ root is unavailable (no cwd, no project).
  */
-function createNotepadFile(cwd: string, goal: string): { path: string; fromFallback: boolean } {
+function createNotepadFile(cwd: string, goal: string): { path: string } | null {
   const ts = makeTimestamp();
   const filename = `ulw-${ts}.md`;
-  let fromFallback = false;
 
   // Preferred: .ohpi/notepad/
   try {
@@ -495,22 +494,22 @@ function createNotepadFile(cwd: string, goal: string): { path: string; fromFallb
     ensureDir(dir);
     const p = join(dir, filename);
     writeFileSync(p, NOTEPAD_SEED(goal, new Date().toISOString()), "utf-8");
-    return { path: p, fromFallback: false };
+    return { path: p };
   } catch {
-    fromFallback = true;
+    // .ohpi/notepad/ failed — try .ohpi/ root directly.
   }
 
-  // Fallback: CI_HOME or OS temp.
-  const base = process.env.CI_HOME ?? process.env.TMPDIR ?? "/tmp";
-  const dir = join(base, "ulw-notepads");
+  // Fallback: .ohpi/ root (still under project, per State & VC policy).
   try {
-    mkdirSync(dir, { recursive: true });
+    const root = join(cwd, ".ohpi");
+    ensureDir(root);
+    const p = join(root, filename);
+    writeFileSync(p, NOTEPAD_SEED(goal, new Date().toISOString()), "utf-8");
+    return { path: p };
   } catch {
-    // If mkdir fails, just write to base directory.
+    // Even .ohpi/ root is unavailable — notepad is a no-op.
+    return null;
   }
-  const p = existsSync(dir) ? join(dir, filename) : join(base, filename);
-  writeFileSync(p, NOTEPAD_SEED(goal, new Date().toISOString()), "utf-8");
-  return { path: p, fromFallback };
 }
 
 /**
@@ -525,28 +524,27 @@ export function appendToNotepad(path: string, content: string): void {
 /**
  * Persist the notepad path via appendEntry so it survives reload.
  */
-function persistNotepadPath(pi: ExtensionAPI, path: string, fromFallback: boolean): void {
+function persistNotepadPath(pi: ExtensionAPI, path: string): void {
   pi.appendEntry(NOTEPAD_ENTRY_TYPE, {
     path,
     cwd: process.cwd(),
-    fromFallback,
     started: new Date().toISOString(),
   } as unknown as Record<string, unknown>);
 }
 
 /**
  * Scan session entries for the last ulw-notepad record.
- * Returns the path and fromFallback flag, or null if none found.
+ * Returns the path, or null if none found.
  */
 export function findNotepadFromEntries(
   entries: { type: string; customType?: string; data?: unknown }[],
-): { path: string; fromFallback: boolean } | null {
-  let found: { path: string; fromFallback: boolean } | null = null;
+): { path: string } | null {
+  let found: { path: string } | null = null;
   for (const entry of entries) {
     if (entry.type === "custom" && entry.customType === NOTEPAD_ENTRY_TYPE) {
-      const data = entry.data as { path?: string; fromFallback?: boolean } | undefined;
+      const data = entry.data as { path?: string } | undefined;
       if (data && typeof data.path === "string") {
-        found = { path: data.path, fromFallback: data.fromFallback ?? true };
+        found = { path: data.path };
       }
     }
   }
@@ -730,14 +728,21 @@ export default function (pi: ExtensionAPI) {
       persist(pi);
 
       // Create the durable notepad (task 15).
-      // Uses .ohpi/notepad/ as the preferred home, falls back to temp if unavailable.
-      const { path, fromFallback } = createNotepadFile(process.cwd(), trimmed);
-      notepadPath = path;
-      needsReRead = true;
-      persistNotepadPath(pi, path, fromFallback);
-
-      const homeLabel = fromFallback ? "temp dir" : ".ohpi/notepad/";
-      ctx.ui.notify(`ULTRAWORK MODE ENABLED! (${tier}) Notepad: ${path} (${homeLabel})`, "info");
+      // Uses .ohpi/notepad/ as the preferred home. Never writes outside .ohpi/.
+      const created = createNotepadFile(process.cwd(), trimmed);
+      if (created) {
+        notepadPath = created.path;
+        needsReRead = true;
+        persistNotepadPath(pi, created.path);
+        ctx.ui.notify(`ULTRAWORK MODE ENABLED! (${tier}) Notepad: ${created.path}`, "info");
+      } else {
+        notepadPath = null;
+        needsReRead = true; // still true — the directive itself needs injection
+        ctx.ui.notify(
+          `ULTRAWORK MODE ENABLED! (${tier}) Notepad unavailable — .ohpi/ not writable.`,
+          "warning",
+        );
+      }
     },
   });
 
@@ -861,5 +866,15 @@ export default function (pi: ExtensionAPI) {
     // This hook is reserved for future turn-level behavior (e.g. reminder
     // injection when ultrawork is active but the model hasn't touched the
     // notepad after N turns).
+  });
+
+  // ── Compaction re-read (task 15) ─────────────────────────────────────────
+  // After context compaction, the notepad working memory is lost from context.
+  // Re-flag needsReRead so the context hook re-injects the re-read instruction
+  // on the next turn, ensuring the agent re-loads Plan, Scenarios, Todo, etc.
+  pi.on("session_compact", () => {
+    if (active && notepadPath && notepadFileExists(notepadPath)) {
+      needsReRead = true;
+    }
   });
 }

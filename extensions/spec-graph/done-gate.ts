@@ -13,10 +13,13 @@
 // Without a graph (db file missing or NOT_INITIALIZED), the gate abstains
 // (escape valve, task 20).
 //
-// Finiteness: the gate fires ONCE per agent_end (one per edge via arbiter).
-// A consecutive-unmet counter tracks retries; after MAX_RETRIES the message
-// escalates but the gate still blocks. The agent/user must fix the graph or
-// delete it to unblock — the gate NEVER allows done through an unmet graph.
+// FINITE: the gate fires at most MAX_RETRIES times per agent_end cycle via the
+// arbiter. After MAX_RETRIES(5) consecutive unmet attempts, the gate STOPS
+// re-driving (decide() returns undefined → loop stops) and maps to a TERMINAL
+// blocked state with the reason durably persisted via appendEntry("goal-state").
+// The agent/user can address it via /cast, fixing the graph, or explicit
+// override. Once the graph is fixed, a subsequent turn re-validates and the gate
+// can clear. NEVER infinite spin.
 //
 // Priority: 201 — highest in loop-engine band (200-299). Checked BEFORE
 // ultrawork evidence-gate (203) and ralph-loop (205), so an unmet graph
@@ -90,6 +93,12 @@ export function buildRePrompt(reasons: string[], retryCount: number): string {
  *
  * Blocks (returns re-prompt) when the graph exists and has unmet items.
  * Also emits ralph:status-change {status:"blocked"} so GUI reflects blocked.
+ *
+ * FINITE: after MAX_RETRIES consecutive unmet attempts, the gate STOPS
+ * re-driving (returns undefined). This prevents infinite spin. The blocked
+ * state is durably persisted so the user/agent can address it (via /cast,
+ * fixing the graph, or explicit override). Once addressed, the next turn
+ * re-validates and the gate can clear.
  */
 export function decide(
   cwd: string,
@@ -123,6 +132,10 @@ export function decide(
     consecutiveUnmet++;
     const errorMsg = result.error?.message ?? "validation failed";
     lastReasons = [`validate error: ${errorMsg}`];
+    if (consecutiveUnmet >= MAX_RETRIES) {
+      if (pi) persistBlocked(pi, lastReasons);
+      return undefined;
+    }
     if (pi) emitBlocked(pi, `spec-graph validate error: ${errorMsg}`, consecutiveUnmet);
     return { prompt: buildRePrompt(lastReasons, consecutiveUnmet) };
   }
@@ -141,8 +154,14 @@ export function decide(
   lastReasons = extractReasons(data);
   const reasonSummary =
     lastReasons.length > 0 ? lastReasons[0] : "graph has unmet validation items";
-  if (pi) emitBlocked(pi, reasonSummary, consecutiveUnmet);
 
+  // FINITE BOUND: after MAX_RETRIES, stop re-driving and persist blocked state.
+  if (consecutiveUnmet >= MAX_RETRIES) {
+    if (pi) persistBlocked(pi, lastReasons);
+    return undefined;
+  }
+
+  if (pi) emitBlocked(pi, reasonSummary, consecutiveUnmet);
   return { prompt: buildRePrompt(lastReasons, consecutiveUnmet) };
 }
 
@@ -159,6 +178,29 @@ function emitBlocked(pi: ExtensionAPI, reason: string, retryCount: number): void
     status: "blocked",
     note: `[spec-graph] ${reason}${suffix}`,
   });
+}
+
+// ── Durable blocked persistence ──────────────────────────────────────────────
+//
+// When the gate reaches MAX_RETRIES and stops re-driving, the blocked state
+// MUST survive session restore so the GUI (which reads persisted goal-state
+// entries) shows "blocked" on cold-browse. We append a goal-state entry
+// matching ralph-loop's STATE_ENTRY_TYPE schema. The entry has status+note
+// but NO objective, so ralph-loop's restore skips it (doesn't overwrite
+// the active goal) while the GUI can still read the blocked status.
+
+const BLOCKED_BY = "spec-graph-done-gate";
+
+function persistBlocked(pi: ExtensionAPI, reasons: string[]): void {
+  const note =
+    reasons.length > 0
+      ? `[${BLOCKED_BY}] ${reasons[0]}`
+      : `[${BLOCKED_BY}] graph has unmet validation items`;
+  pi.appendEntry("goal-state", {
+    status: "blocked",
+    note,
+    blockedBy: BLOCKED_BY,
+  } as unknown as Record<string, unknown>);
 }
 
 // ── Registration ─────────────────────────────────────────────────────────────

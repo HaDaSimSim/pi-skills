@@ -324,6 +324,44 @@ async function run() {
   assert(GATE_NAME === "spec-graph-done-gate", `DG-21a: GATE_NAME correct`);
   assert(GATE_PRIORITY === 201, `DG-21b: GATE_PRIORITY=201 (highest in loop-engine band)`);
 
+  // DG-22: FINITE BOUND — after MAX_RETRIES, decide() stops (returns undefined)
+  assert(
+    dgSrc.includes("consecutiveUnmet >= MAX_RETRIES"),
+    "DG-22a: decide checks consecutiveUnmet >= MAX_RETRIES for finite bound",
+  );
+  assert(
+    dgSrc.includes("return undefined"),
+    "DG-22b: at MAX_RETRIES, decide returns undefined (stops re-driving)",
+  );
+
+  // DG-23: PERSIST BLOCKED STATE — persistBlocked appends goal-state entry
+  assert(
+    dgSrc.includes("persistBlocked"),
+    "DG-23a: persistBlocked function exists for durable blocked state",
+  );
+  assert(
+    dgSrc.includes('appendEntry("goal-state"'),
+    "DG-23b: persistBlocked calls appendEntry with goal-state entry type",
+  );
+  assert(
+    dgSrc.includes('status: "blocked"'),
+    "DG-23c: persistBlocked sets status to blocked in goal-state entry",
+  );
+  assert(
+    dgSrc.includes("blockedBy"),
+    "DG-23d: persistBlocked includes blockedBy field for traceability",
+  );
+  assert(
+    dgSrc.includes("BLOCKED_BY"),
+    "DG-23e: blockedBy identifies spec-graph-done-gate as the blocking source",
+  );
+
+  // DG-24: FINITE DOCUMENTED — header comment describes finite bound
+  assert(
+    dgSrc.includes("MAX_RETRIES") && dgSrc.includes("STOPS") && dgSrc.includes("re-driving"),
+    "DG-24: header documents finite bound (STOPS re-driving after MAX_RETRIES)",
+  );
+
   // ── Part 6: Escape valve regression tests (task 20) ──────────────────────
 
   // EV-1: decide(no-graph) returns undefined — the named escape valve.

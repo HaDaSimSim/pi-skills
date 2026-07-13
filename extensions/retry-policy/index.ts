@@ -327,10 +327,18 @@ export default function (pi: ExtensionAPI) {
   // ── User-abort detection: break the fallback loop on abort ─────────────
   // PASSIVE agent_end listener — only clears state, does NOT inject continuations.
   // This is allowed under the guardrail (same pattern as primary-agents:209 + toolcall-nudge:94).
+  //
+  // SDK AgentEndEvent = { type, messages: AgentMessage[] } — NO stopReason
+  // at the event level. The stopReason lives on the AssistantMessage inside
+  // the messages array (AssistantMessage.stopReason: "stop"|"length"|
+  // "toolUse"|"error"|"aborted"). Scan the last assistant message to detect
+  // user abort (Esc).
   pi.on("agent_end", (event: unknown) => {
-    const ev = event as { stopReason?: string; turn: { stopReason?: string } } | undefined;
-    const stopReason = ev?.stopReason ?? ev?.turn?.stopReason;
-    if (stopReason === "aborted") {
+    const ev = event as { messages?: { role?: string; stopReason?: string }[] } | undefined;
+    const messages = ev?.messages ?? [];
+    // Find the last assistant message (in reverse) and check its stopReason.
+    const lastAssistant = [...messages].reverse().find((m) => m?.role === "assistant");
+    if (lastAssistant?.stopReason === "aborted") {
       fallbackPending = false;
     }
   });

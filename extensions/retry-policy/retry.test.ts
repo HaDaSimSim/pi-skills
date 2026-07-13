@@ -328,8 +328,22 @@ test("abort: has passive agent_end listener for stopReason detection", () => {
   );
 });
 
-test("abort: checks stopReason for aborted", () => {
-  assert(srcIndex.includes('stopReason === "aborted"'), "must check stopReason === 'aborted'");
+test("abort: checks stopReason on last assistant message in event.messages", () => {
+  // The stopReason is on the AssistantMessage inside event.messages array,
+  // NOT on the AgentEndEvent itself. We must scan messages for the last
+  // assistant and check its stopReason field.
+  assert(
+    srcIndex.includes('role === "assistant"'),
+    "must scan messages for assistant role to find stopReason",
+  );
+  assert(
+    srcIndex.includes('stopReason === "aborted"'),
+    "must check stopReason === 'aborted' on the assistant message",
+  );
+  assert(
+    srcIndex.includes("agent_end") && srcIndex.includes("messages"),
+    "agent_end handler must access event.messages (not event.stopReason)",
+  );
 });
 
 test("abort: clears fallbackPending on abort", () => {
