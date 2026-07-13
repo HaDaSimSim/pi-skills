@@ -51,6 +51,8 @@ import extensionEntrypoint, {
 // ── Coordinator compose test imports ──────────────────────────────────────────
 // These import from the hook-coordinator extension (a sibling in the repo).
 
+// ── Evidence capture test imports (task 27) ─────────────────────────────────
+import { _resetSeqForTest, writeEvidence } from "../evidence/index.ts";
 import { __sections, composeSystemPrompt } from "../hook-coordinator/index.ts";
 
 // ── Forbidden token set ──────────────────────────────────────────────────────
@@ -68,9 +70,9 @@ const OC = "ope" + "ncode";
 
 const FORBIDDEN_TOKENS: readonly string[] = [
   // System references
-  "@" + OC,
+  `@${OC}`,
   OC,
-  "@oh-my-" + OC,
+  `@oh-my-${OC}`,
   "@oh-my-openagent",
   "oh-my-openagent",
 
@@ -660,6 +662,184 @@ function _activateLight(): void {
   _resetForTest();
   _setEvidenceOverrideForTest(null);
   console.log("PASS: arbiter coexistence — ralph (205) wins when evidence-gate (203) abstains");
+}
+
+// ── Evidence capture tests (task 27) ───────────────────────────────────────
+
+import { spawnSync } from "node:child_process";
+
+// Test EV-1: evidencePresent → true when structured evidence records exist at cwd.
+{
+  _resetForTest();
+  _resetSeqForTest();
+  const cwd = process.cwd();
+
+  // Write a real evidence record using task 26's writer to the actual cwd.
+  const evidencePath = writeEvidence(cwd, "ultrawork", {
+    type: "test-output",
+    surface: "cli:directive.test",
+    content: "Structured evidence record for evidencePresent test",
+  });
+  assert.ok(evidencePath.includes(".ohpi/evidence/"), "evidence should land under .ohpi/evidence");
+
+  _setEvidenceOverrideForTest(null);
+  const hasEvidence = evidencePresent();
+  assert.strictEqual(
+    hasEvidence,
+    true,
+    "evidencePresent should return true when structured evidence exists",
+  );
+
+  // Clean up: remove the evidence file so it doesn't leak to subsequent runs.
+  const evidenceDir = join(cwd, ".ohpi", "evidence");
+  rmSync(evidenceDir, { recursive: true, force: true });
+
+  _resetForTest();
+  console.log("PASS: evidencePresent returns true when structured evidence records exist");
+}
+
+// Test EV-2: evidencePresent → false when no evidence records + no notepad.
+{
+  _resetForTest();
+  _setEvidenceOverrideForTest(null);
+
+  const result = evidencePresent();
+  assert.strictEqual(
+    result,
+    false,
+    "evidencePresent should return false without records or notepad",
+  );
+
+  _resetForTest();
+  console.log("PASS: evidencePresent returns false when no records and no notepad path");
+}
+
+// Test EV-3: evidencePresent → true via notepad fallback (backward compat).
+{
+  _resetForTest();
+  const tmp = mkdtempSync(join(tmpdir(), "ulw-evfb-"));
+  const testPath = join(tmp, "notepad.md");
+  writeFileSync(testPath, "x".repeat(600), "utf-8");
+  _setNotepadPathForTest(testPath);
+  _setEvidenceOverrideForTest(null);
+
+  const result = evidencePresent();
+  assert.strictEqual(
+    result,
+    true,
+    "evidencePresent should fall back to notepad-size when no evidence records",
+  );
+
+  rmSync(tmp, { recursive: true, force: true });
+  _setNotepadPathForTest(null);
+  _resetForTest();
+  console.log("PASS: evidencePresent falls back to notepad-size heuristic (backward compat)");
+}
+
+// Test EV-4: Directive text contains /ultrawork-evidence command mention.
+{
+  assert.ok(
+    ULTRAWORK_DIRECTIVE.includes("/ultrawork-evidence"),
+    "directive should mention /ultrawork-evidence command for agent-driven capture",
+  );
+  assert.ok(
+    ULTRAWORK_DIRECTIVE.includes("EVIDENCE"),
+    "directive should have EVIDENCE step in RED→GREEN→SURFACE→CLEAN flow",
+  );
+  console.log("PASS: directive text includes /ultrawork-evidence evidence capture instruction");
+}
+
+// Test EV-5: Evidence-gate uses upgraded evidencePresent (HEAVY + record → abstains).
+{
+  _resetForTest();
+  _activateHeavy();
+  _setEvidenceOverrideForTest(true);
+
+  const intent = {
+    name: "ultrawork-evidence-gate-evcap",
+    priority: 203,
+    order: 0,
+    decide: () => {
+      if (!isActive()) return undefined;
+      if (getTier() !== "HEAVY") return undefined;
+      if (evidencePresent()) return undefined;
+      return { prompt: "should not happen" };
+    },
+  };
+  __continuations.set(intent.name, intent);
+
+  setRunningSubagentsForTest(0);
+  const result = resolveContinuation();
+  assert.strictEqual(
+    result,
+    undefined,
+    "evidence-gate should abstain when evidencePresent returns true",
+  );
+
+  __continuations.delete(intent.name);
+  _resetForTest();
+  _setEvidenceOverrideForTest(null);
+  console.log(
+    "PASS: evidence-gate abstains with upgraded evidencePresent (HEAVY + records present)",
+  );
+}
+
+// Test EV-6: Evidence-gate fires when upgraded evidencePresent returns false.
+{
+  _resetForTest();
+  _activateHeavy();
+  _setEvidenceOverrideForTest(false);
+
+  const intent = {
+    name: "ultrawork-evidence-gate-evcap2",
+    priority: 203,
+    order: 0,
+    decide: () => {
+      if (!isActive()) return undefined;
+      if (getTier() !== "HEAVY") return undefined;
+      if (evidencePresent()) return undefined;
+      return { prompt: "[evidence-gate] HEAVY task needs proof before done." };
+    },
+  };
+  __continuations.set(intent.name, intent);
+
+  setRunningSubagentsForTest(0);
+  const result = resolveContinuation();
+  assert.ok(result !== undefined, "evidence-gate should fire when evidencePresent returns false");
+  assert.ok(result!.prompt.includes("HEAVY"), "re-prompt should mention HEAVY");
+
+  __continuations.delete(intent.name);
+  _resetForTest();
+  _setEvidenceOverrideForTest(null);
+  console.log("PASS: evidence-gate fires with upgraded evidencePresent (HEAVY + no records)");
+}
+
+// Test EV-7: writeEvidence produces jq-valid record with required fields.
+{
+  _resetSeqForTest();
+  const cwd = process.cwd();
+  const filePath = writeEvidence(cwd, "ultrawork-test", {
+    type: "test-output",
+    surface: "cli:directive.test.ts",
+    content: "Ultrawork evidence capture test — structured record",
+  });
+
+  const jqResult = spawnSync("jq", ["-e", ".timestamp and .type and .content", filePath], {
+    encoding: "utf-8",
+  });
+  assert.strictEqual(jqResult.status, 0, `jq -e on evidence record failed: ${jqResult.stderr}`);
+
+  const raw = readFileSync(filePath, "utf-8");
+  const record = JSON.parse(raw);
+  assert.strictEqual(record.type, "test-output");
+  assert.strictEqual(record.surface, "cli:directive.test.ts");
+  assert.strictEqual(record.content, "Ultrawork evidence capture test — structured record");
+  assert.ok(typeof record.timestamp === "string", "timestamp must be present");
+  console.log(`PASS: jq-valid evidence record with required fields: ${filePath}`);
+
+  // Clean up.
+  const evidenceDir = join(cwd, ".ohpi", "evidence");
+  rmSync(evidenceDir, { recursive: true, force: true });
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

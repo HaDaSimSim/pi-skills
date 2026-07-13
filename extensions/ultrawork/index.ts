@@ -20,12 +20,26 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
-  readFileSync,
+  readdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+// ── Cross-extension wiring (task 27) ─────────────────────────────────────────
+//
+// The evidence extension (task 26) is a capture library that provides
+// writeEvidence() + EvidenceRecord + redactContent(). Ultrawork imports it
+// via a direct relative path between sibling extensions. Because `make install`
+// symlinks both extensions into ~/.pi/agent/extensions/, the relative import
+// resolves correctly at runtime (Node follows symlinks to the real file).
+//
+// This is the cleanest self-contained approach: no shared-module extraction,
+// no shell-out, just a TypeScript import between two extensions in the same
+// repo. The evidence extension has NO pi SDK dependency — it only uses
+// node:fs and node:path — so the import does not pull in a second
+// ExtensionAPI instance.
+import { writeEvidence } from "../evidence/index.ts";
 import { ensureDir, ohpiSubdir } from "./shared/ohpi-paths.ts";
 
 // ── Directive text (harvested + adapted for pi) ──────────────────────────────
@@ -236,6 +250,8 @@ Supporting (necessary, not sufficient): build exit 0, full suite green, lsp_diag
 
 Tests are the FLOOR (always required). Surface artifact is the CEILING (also required). "tests pass" alone is NOT done.
 
+**Structured evidence record**: After capturing both artifacts, call \`/ultrawork-evidence <type> <surface> <content>\` to produce a machine-checkable evidence record. HEAVY tier requires >=1 such record — without it the evidence-gate blocks done. Types: test-output, bash-output, curl-response, screenshot, browser-action, manual-qa, build-output, lsp-output, db-state, config-dump, notepad-excerpt, general.
+
 <MANUAL_QA_MANDATE>
 ### YOU MUST EXECUTE MANUAL QA YOURSELF. THIS IS NOT OPTIONAL.
 
@@ -276,6 +292,9 @@ Test-first is not optional. Every behavior change — features, fixes, refactors
 2. **GREEN**: Write the SMALLEST change that flips RED→GREEN. Re-run. Capture GREEN output. If GREEN required ~20+ lines, your test was too coarse — split it.
 3. **SURFACE**: Exercise the real user-facing surface named by the scenario. Capture artifact path into the notepad.
 4. **CLEAN**: Refactor if needed (tests MUST stay green throughout). Re-run the FULL scenario list. Record PASS/FAIL inline with both evidence paths. Execute all teardown todos. Verify lsp_diagnostics clean, build green.
+5. **EVIDENCE**: Call \`/ultrawork-evidence <type> <surface> <content>\` to produce a structured evidence record for the scenario. Types: test-output, bash-output, curl-response, screenshot, browser-action, manual-qa, build-output, lsp-output, db-state, config-dump, notepad-excerpt, general. Surface identifies the real surface (e.g. "cli:pnpm test", "bash:curl /status"). The evidence-gate checks for >=1 record — without it, HEAVY tier cannot declare done. (Content is automatically redacted for secrets.)
+
+**HEAVY tier requires >=1 structured evidence record.**
 
 **Refactor exception**: Write characterization tests pinning current observable behavior FIRST, watch them go GREEN against old code, THEN refactor. They remain green throughout.
 
@@ -491,7 +510,7 @@ function createNotepadFile(cwd: string, goal: string): { path: string; fromFallb
   }
   const p = existsSync(dir) ? join(dir, filename) : join(base, filename);
   writeFileSync(p, NOTEPAD_SEED(goal, new Date().toISOString()), "utf-8");
-  return { path: p, fromFallback: true };
+  return { path: p, fromFallback };
 }
 
 /**
@@ -500,7 +519,7 @@ function createNotepadFile(cwd: string, goal: string): { path: string; fromFallb
  */
 export function appendToNotepad(path: string, content: string): void {
   const marker = `\n<!-- appended ${new Date().toISOString()} -->\n`;
-  appendFileSync(path, marker + content + "\n", "utf-8");
+  appendFileSync(path, `${marker}${content}\n`, "utf-8");
 }
 
 /**
@@ -543,18 +562,17 @@ function notepadFileExists(path: string): boolean {
   }
 }
 
-// ── Evidence gate (task 16) ──────────────────────────────────────────────────
+// ── Evidence gate (task 16 + task 27 upgrade) ────────────────────────────────
 //
 // HEAVY-tier ultrawork tasks require evidence before "done". This gate checks
 // whether the agent has captured proof (RED→GREEN, surface artifact, manual QA
-// output) in the notepad. If HEAVY + evidence is missing at agent_end, the
-// gate returns a re-prompt that blocks "done". LIGHT tier skips the gate.
+// output). If HEAVY + evidence is missing at agent_end, the gate returns a
+// re-prompt that blocks "done". LIGHT tier skips the gate.
 //
-// Interim evidencePresent() definition (task 16): the notepad file exists AND
-// has grown beyond the initial seed (~9 lines / ~400 chars). Once content is
-// appended, the agent has recorded at least minimal evidence. Task 26/27 will
-// upgrade evidencePresent() with structured evidence capture (scenario
-// artifacts, RED→GREEN output markers, surface-evidence path records).
+// Task 27 upgrade: evidencePresent() now checks for REAL structured evidence
+// records under .ohpi/evidence/<date>-*/ first (task 26 writer). Falls back to
+// the original notepad-size heuristic for backward compatibility with runs
+// that haven't adopted the /ultrawork-evidence command yet.
 //
 // Priority 203 (< ralph-loop's 205): evidence-gate is checked FIRST by the
 // arbiter. When HEAVY + incomplete → evidence-gate fires (blocks done, asks
@@ -562,8 +580,8 @@ function notepadFileExists(path: string): boolean {
 // evidence OK, LIGHT tier, or ultrawork inactive).
 
 /** Minimum file size (bytes) a notepad should have before we consider it
- *  beyond the bare seed. The seed is ~390 bytes; after a single finding or
- *  TODO append it passes. Task 27 will tighten this threshold. */
+ *  beyond the bare seed. The seed is ~390 bytes. Only used as fallback
+ *  when no structured evidence records exist. */
 const SEED_SIZE_MAX = 500;
 
 let _evidenceOverride: boolean | null = null;
@@ -572,8 +590,41 @@ export function _setEvidenceOverrideForTest(value: boolean | null): void {
   _evidenceOverride = value;
 }
 
+/**
+ * Check whether the current ultrawork session has produced >=1 structured
+ * evidence record under .ohpi/evidence/, OR (fallback) whether the notepad
+ * has grown beyond the initial seed.
+ *
+ * Task 27 upgrade from task 16's interim notepad-size heuristic:
+ *   - Primary: scan .ohpi/evidence/ for today's date-prefixed directories
+ *     that contain at least one .json file (a writeEvidence record).
+ *   - Fallback: notepad file exists and size > SEED_SIZE_MAX.
+ *   - Test override: _evidenceOverride (set for gate unit tests).
+ */
 export function evidencePresent(): boolean {
   if (_evidenceOverride !== null) return _evidenceOverride;
+
+  const cwd = process.cwd();
+  try {
+    const evidenceBase = ohpiSubdir(cwd, "evidence");
+    if (existsSync(evidenceBase)) {
+      const datePrefix = new Date().toISOString().slice(0, 10);
+      const entries = readdirSync(evidenceBase, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name.startsWith(datePrefix)) {
+          const dirPath = join(evidenceBase, entry.name);
+          const files = readdirSync(dirPath);
+          if (files.some((f) => f.endsWith(".json"))) {
+            return true;
+          }
+        }
+      }
+    }
+  } catch {
+    // evidence dir doesn't exist or is unreadable — fall through to notepad check
+  }
+
+  // Fallback: notepad-size heuristic (task 16 original, backward compat)
   if (!notepadPath) return false;
   try {
     const stat = statSync(notepadPath);
@@ -687,6 +738,58 @@ export default function (pi: ExtensionAPI) {
 
       const homeLabel = fromFallback ? "temp dir" : ".ohpi/notepad/";
       ctx.ui.notify(`ULTRAWORK MODE ENABLED! (${tier}) Notepad: ${path} (${homeLabel})`, "info");
+    },
+  });
+
+  // ── /ultrawork-evidence command (task 27) ──────────────────────────────────
+  // Agent-driven evidence capture: the ultrawork directive instructs the agent
+  // to call this command at SURFACE/CLEAN points to produce a structured
+  // EvidenceRecord via task 26's writeEvidence(). Content is automatically
+  // redacted (secrets stripped) before writing.
+  //
+  // Usage: /ultrawork-evidence <type> <surface> <content...>
+  //
+  // The record lands under .ohpi/evidence/<date>-ultrawork/<ts>-<type>-<seq>.json.
+  // evidencePresent() checks for these records to satisfy the evidence-gate.
+
+  pi.registerCommand("ultrawork-evidence", {
+    description:
+      "Capture structured evidence during ultrawork. " +
+      "/ultrawork-evidence <type> <surface> <content> — type is one of: test-output, bash-output, " +
+      "curl-response, screenshot, browser-action, manual-qa, build-output, lsp-output, " +
+      "db-state, config-dump, notepad-excerpt, general. Surface identifies the real " +
+      "surface (e.g. cli:pnpm test). Content is the evidence payload (secrets redacted).",
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+      const firstSpace = trimmed.indexOf(" ");
+      if (firstSpace < 0) {
+        ctx.ui.notify(
+          "Usage: /ultrawork-evidence <type> <surface> <content>. Types: test-output, bash-output, " +
+            "curl-response, screenshot, browser-action, manual-qa, build-output, lsp-output, " +
+            "db-state, config-dump, notepad-excerpt, general.",
+          "error",
+        );
+        return;
+      }
+      const secondSpace = trimmed.indexOf(" ", firstSpace + 1);
+      if (secondSpace < 0) {
+        ctx.ui.notify(
+          "Evidence requires surface and content. " +
+            "Usage: /ultrawork-evidence <type> <surface> <content>",
+          "error",
+        );
+        return;
+      }
+      const type = trimmed.slice(0, firstSpace);
+      const surface = trimmed.slice(firstSpace + 1, secondSpace);
+      const content = trimmed.slice(secondSpace + 1);
+      try {
+        const path = writeEvidence(ctx.cwd, "ultrawork", { type, surface, content });
+        ctx.ui.notify(`Evidence recorded: ${path}`, "info");
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(`Evidence write failed: ${msg}`, "error");
+      }
     },
   });
 
