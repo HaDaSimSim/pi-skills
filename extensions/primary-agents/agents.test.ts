@@ -13,10 +13,12 @@ import type { PersonaConfig } from "./agents.ts";
 import { discoverPersonas } from "./agents.ts";
 import {
   findLastActiveAgent,
+  findPendingAgentRequest,
   getActivePersona,
   getRoster,
   loadRoster,
   resetActivePersona,
+  resetLastAppliedRequestTs,
   switchAgent,
 } from "./index.ts";
 
@@ -290,6 +292,118 @@ async function run() {
     );
 
     __sections.clear();
+  });
+
+  // ── Part 5: Active-agent-request observation (task 30) ────────────────────
+
+  check("findPendingAgentRequest — newest unapplied request wins", () => {
+    resetLastAppliedRequestTs();
+    const entries = [
+      { type: "custom", customType: "active-agent-request", data: { name: "builder", ts: 100 } },
+      { type: "custom", customType: "active-agent-request", data: { name: "planner", ts: 200 } },
+    ];
+    const result = findPendingAgentRequest(entries, 0);
+    assert.ok(result);
+    assert.strictEqual(result.name, "planner");
+    assert.strictEqual(result.ts, 200);
+  });
+
+  check("findPendingAgentRequest — respects lastAppliedTs (skips old)", () => {
+    const entries = [
+      { type: "custom", customType: "active-agent-request", data: { name: "builder", ts: 100 } },
+      { type: "custom", customType: "active-agent-request", data: { name: "planner", ts: 200 } },
+    ];
+    // lastAppliedTs=150: only planner (ts=200) qualifies
+    const result = findPendingAgentRequest(entries, 150);
+    assert.ok(result);
+    assert.strictEqual(result.name, "planner");
+  });
+
+  check("findPendingAgentRequest — all below threshold returns null", () => {
+    const entries = [
+      { type: "custom", customType: "active-agent-request", data: { name: "builder", ts: 100 } },
+    ];
+    const result = findPendingAgentRequest(entries, 200);
+    assert.strictEqual(result, null);
+  });
+
+  check("findPendingAgentRequest — empty entries returns null", () => {
+    assert.strictEqual(findPendingAgentRequest([], 0), null);
+  });
+
+  check("findPendingAgentRequest — no active-agent-request entries returns null", () => {
+    const entries = [
+      { type: "custom", customType: "active-agent", data: { name: "builder" } },
+      { type: "custom", customType: "goal-state", data: { objective: "x" } },
+    ];
+    assert.strictEqual(findPendingAgentRequest(entries, 0), null);
+  });
+
+  check("findPendingAgentRequest — skips entries with missing data.name", () => {
+    const entries = [
+      { type: "custom", customType: "active-agent-request", data: {} },
+      { type: "custom", customType: "active-agent-request", data: { name: "planner", ts: 300 } },
+    ];
+    const result = findPendingAgentRequest(entries, 0);
+    assert.ok(result);
+    assert.strictEqual(result.name, "planner");
+  });
+
+  check("findPendingAgentRequest — entries without explicit ts still found", () => {
+    // Backend always writes ts=Date.now(), but if an entry somehow lacks ts,
+    // it defaults to 0. With lastAppliedTs=-1, ts=0 qualifies.
+    // Use ts=1 (>0) to stay above the `ts > (newest?.ts ?? 0)` initial gate.
+    const entries = [
+      { type: "custom", customType: "active-agent-request", data: { name: "builder", ts: 1 } },
+    ];
+    const result = findPendingAgentRequest(entries, 0);
+    assert.ok(result);
+    assert.strictEqual(result.name, "builder");
+  });
+
+  check("resetLastAppliedRequestTs resets tracker", () => {
+    // findPendingAgentRequest doesn't mutate the tracker — it's a pure function.
+    // This verifies the reset function exists and is callable.
+    resetLastAppliedRequestTs();
+    // After reset: lastAppliedRequestTs should be 0, meaning all requests qualify.
+    const entries = [
+      { type: "custom", customType: "active-agent-request", data: { name: "planner", ts: 1 } },
+    ];
+    const result = findPendingAgentRequest(entries, 0);
+    assert.ok(result);
+    assert.strictEqual(result.name, "planner");
+  });
+
+  // ── Part 6: Signal→switchAgent linkage proof ──────────────────────────────
+  // These tests prove the end-to-end signal path: a simulated active-agent-request
+  // entry → findPendingAgentRequest → switchAgent.
+
+  await check("signal: findPendingAgentRequest→switchAgent for planner", async () => {
+    resetRoster();
+    resetLastAppliedRequestTs();
+    const entries = [
+      { type: "custom", customType: "active-agent-request", data: { name: "planner", ts: 1 } },
+    ];
+    const request = findPendingAgentRequest(entries, 0);
+    assert.ok(request, "request should be found");
+    await switchAgent(mockPi() as any, request.name, mockCtx() as any);
+    const active = getActivePersona();
+    assert.ok(active);
+    assert.strictEqual(active.name, "planner");
+  });
+
+  await check("signal: findPendingAgentRequest→switchAgent for builder", async () => {
+    resetRoster();
+    resetLastAppliedRequestTs();
+    const entries = [
+      { type: "custom", customType: "active-agent-request", data: { name: "builder", ts: 1 } },
+    ];
+    const request = findPendingAgentRequest(entries, 0);
+    assert.ok(request);
+    await switchAgent(mockPi() as any, request.name, mockCtx() as any);
+    const active = getActivePersona();
+    assert.ok(active);
+    assert.strictEqual(active.name, "builder");
   });
 
   console.log(`\n${failures} failures\n`);

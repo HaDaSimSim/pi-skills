@@ -8,6 +8,12 @@
 // On every switch, the active persona is persisted via appendEntry. On
 // session_start, the last active-agent entry is restored and switchAgent
 // re-applies model + tools + persona body. A fresh session defaults to builder.
+//
+// An external caller (pi-gui backend) can request a persona switch by writing
+// an "active-agent-request" custom entry to the session. This extension observes
+// that entry on turn_start and self-applies switchAgent. The switch takes effect
+// on the SAME turn (turn_start fires before before_agent_start, so the
+// coordinator's section getText() picks up the new persona body).
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { discoverPersonas, type PersonaConfig } from "./agents.ts";
@@ -21,6 +27,15 @@ let __streaming = false;
 /** Reset the active persona (for tests). */
 export function resetActivePersona(): void {
   activePersona = null;
+}
+
+// Tracks the last-applied active-agent-request timestamp to avoid re-applying
+// the same request on every hook invocation (entries persist forever).
+let lastAppliedRequestTs = 0;
+
+/** Reset the last-applied request tracker (for tests). */
+export function resetLastAppliedRequestTs(): void {
+  lastAppliedRequestTs = 0;
 }
 
 // ── Roster loading ───────────────────────────────────────────────────────────
@@ -170,6 +185,34 @@ type SessionEntry = {
   data?: unknown;
 };
 
+// ── Active-agent-request finder ──────────────────────────────────────────────
+
+/**
+ * Scan entries for the newest unapplied "active-agent-request" entry.
+ * Returns the requested name and timestamp if one exists with ts > lastAppliedTs.
+ * Exported for testing.
+ */
+export function findPendingAgentRequest(
+  entries: SessionEntry[],
+  lastAppliedTs: number,
+): { name: string; ts: number } | null {
+  let newest: { name: string; ts: number } | null = null;
+  for (const entry of entries) {
+    if (entry.type === "custom" && entry.customType === "active-agent-request") {
+      const data = entry.data as { name?: string; ts?: number } | undefined;
+      if (data && typeof data.name === "string") {
+        const ts = data.ts ?? 0;
+        if (ts > lastAppliedTs && ts > (newest?.ts ?? 0)) {
+          newest = { name: data.name, ts };
+        }
+      }
+    }
+  }
+  return newest;
+}
+
+// ── Session restore (active-agent entries) ───────────────────────────────────
+
 /**
  * Find the last active-agent entry from a list of session entries.
  * Returns the persona name or null if none found. Exported for testing.
@@ -205,6 +248,28 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_settled", () => {
     __streaming = false;
+  });
+
+  // ── Active-agent-request observation ──────────────────────────────────────
+  // Observes "active-agent-request" custom entries written by pi-gui backend.
+  // On finding a new request, self-applies switchAgent. Uses turn_start
+  // (fires BEFORE before_agent_start) so the persona body change is picked up
+  // by the coordinator's section getText() on the SAME turn — no staleness.
+  // Uses turn_start rather than before_agent_start to preserve the coordinator's
+  // sole ownership of before_agent_start (guardrail: only hook-coordinator may
+  // register before_agent_start/agent_end after Wave 1).
+
+  pi.on("turn_start", async (_event, ctx) => {
+    const entries = ctx.sessionManager.getEntries() as SessionEntry[];
+    const request = findPendingAgentRequest(entries, lastAppliedRequestTs);
+    if (request) {
+      lastAppliedRequestTs = request.ts;
+      try {
+        await switchAgent(pi, request.name, ctx);
+      } catch {
+        // Unknown persona or switch failure — doesn't block the turn.
+      }
+    }
   });
 
   // ── Session restore ─────────────────────────────────────────────────────
