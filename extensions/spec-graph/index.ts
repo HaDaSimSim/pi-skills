@@ -12,9 +12,18 @@
 // CLI-presence check: if `spec-graph` is not on PATH, every export no-ops quietly
 // (graphExists→false, all wrappers return { ok: false, error: "CLI missing" }).
 // Follows the no-op-quietly philosophy from extensions/AGENTS.md.
+//
+// EXTENSION ENTRYPOINT: The default export is a pi extension factory that wires
+// the done-gate continuation intent at load time. pi loads index.ts (not
+// done-gate.ts) — without this default export, spec-graph errors as "does not
+// export a valid factory function". The done-gate's own export default is
+// harmless (never called by pi directly) but preserved for standalone testing.
+// The CANONICAL entrypoint is this file (index.ts).
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerDoneGate } from "./done-gate.ts";
 import { ensureDir, ohpiSubdir } from "./shared/ohpi-paths.ts";
 
 // ── CLI detection (cached) ──────────────────────────────────────────────────
@@ -426,4 +435,10 @@ export async function relation(
   ...subcommandArgs: string[]
 ): Promise<SgResult<unknown>> {
   return sgCommand(["relation", ...subcommandArgs], cwd);
+}
+
+// ── Extension factory (pi loads index.ts — canonical entrypoint) ─────────────
+
+export default function (pi: ExtensionAPI): void {
+  registerDoneGate(pi, process.cwd());
 }
