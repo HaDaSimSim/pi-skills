@@ -11,7 +11,7 @@
     "format:check": "biome format extensions",
     "check": "biome check extensions",
     "check:fix": "biome check --write extensions",
-    "typecheck": "scripts/check-extensions.py extensions/async-bash extensions/btw extensions/file-guards extensions/hook-coordinator extensions/primary-agents extensions/question extensions/ralph-loop extensions/session-lock extensions/shared extensions/stats extensions/subagents extensions/telegram extensions/ui-cosmetics extensions/ultrawork",
+    "typecheck": "scripts/check-extensions.py extensions/async-bash extensions/btw extensions/file-guards extensions/hook-coordinator extensions/primary-agents extensions/question extensions/ralph-loop extensions/session-lock extensions/shared extensions/spec-graph extensions/stats extensions/subagents extensions/telegram extensions/ui-cosmetics extensions/ultrawork",
     "go:fmt": "gofmt -w $(find . -name '*.go' -not -path '*/node_modules/*')",
     "go:fmt:check": "test -z \"$(gofmt -l $(find . -name '*.go' -not -path '*/node_modules/*'))\"",
     "go:vet": "go vet ./...",

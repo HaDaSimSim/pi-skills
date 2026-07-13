@@ -1,11 +1,17 @@
-// todo for pi — a port of Claude Code's TodoWrite to pi.
+// todo for pi — a human-facing "what/why I'm doing" REASONS display.
 //
 // Concept:
-//   A structured task list used while the agent works through a multi-step task.
-//   When the model replaces the whole list via todo_write, the progress at that
-//   point is shown to the user. This is not a personal todo managed by the user;
-//   it's a tracking tool for the agent that surfaces "what it's doing now and what
-//   it'll do next".
+//   A structured list the model uses to SURFACE ITS INTENT to the human: "what
+//   I'm doing now and why, and what I'll do next". It replaces the whole list via
+//   todo_write to keep the human oriented as the work moves. This is not a personal
+//   todo managed by the user, and — importantly — it is NOT the authority for
+//   whether the work is actually done.
+//
+//   Done-authority lives in spec-graph (the done-gate reads `spec-graph validate`,
+//   never these todo entries). The two are DISTINCT sources: todo communicates
+//   reasons/intent to the human; spec-graph decides completion. Marking every item
+//   completed here clears the DISPLAY, but it does NOT declare the task done and
+//   nothing downstream treats a cleared list as a done signal.
 //
 // Display:
 //   - While the agent is working (turn_start ~ agent_end), a widget showing the
@@ -220,17 +226,21 @@ export default function (pi: ExtensionAPI) {
     name: "todo_write",
     label: "Write Todos",
     description:
-      "Create or update the structured task list for the current work. Pass the FULL " +
-      "list every time — it replaces the previous list wholesale. Use this to plan " +
-      "multi-step work and to surface progress to the user: mark exactly one item as " +
-      "in_progress while you work on it, and flip items to completed as soon as they " +
-      "are done. Skip it for trivial single-step tasks.",
-    promptSnippet: "Track multi-step work with a structured todo list via todo_write",
+      "Surface WHAT you're doing and WHY to the human, as a structured reasons " +
+      "list. Pass the FULL list every time — it replaces the previous list " +
+      "wholesale. Use it to communicate your intent and progress on multi-step " +
+      "work: mark exactly one item as in_progress while you work on it, and flip " +
+      "items to completed as they finish, so the human can follow along. This is a " +
+      "human-facing DISPLAY, NOT a self-certification of completion: it does NOT " +
+      "decide whether the work is done (spec-graph validation is the done-authority). " +
+      "Skip it for trivial single-step tasks.",
+    promptSnippet: "Surface your reasons (what/why you're doing) to the human via todo_write",
     promptGuidelines: [
-      "Use todo_write for multi-step or non-trivial tasks to plan and show progress; skip it for single trivial steps.",
+      "Use todo_write on multi-step or non-trivial tasks to show the human what you're doing and why; skip it for single trivial steps.",
       "Always send the complete list — todo_write replaces the whole list, it does not merge.",
-      "Keep exactly one item in_progress at a time; mark items completed immediately when finished, not in a batch at the end.",
-      "Provide activeForm (present continuous, e.g. 'Running tests') so the in-progress item reads naturally while working.",
+      "Keep exactly one item in_progress at a time; flip items to completed as you go so the human sees live progress, not a batch at the end.",
+      "This list is a human-facing reasons display, not a done-gate: marking everything completed clears the display but does NOT declare the task done — completion is judged elsewhere (spec-graph).",
+      "Provide activeForm (present continuous, e.g. 'Running tests') so the in-progress item reads naturally to the human.",
     ],
     parameters: Type.Object({
       todos: Type.Array(
@@ -270,10 +280,11 @@ export default function (pi: ExtensionAPI) {
     name: "todo_read",
     label: "Read Todos",
     description:
-      "Read the current task list (the one managed by todo_write). Use this to re-check " +
-      "your remaining work without re-sending the whole list — e.g. after a long tangent, " +
-      "or when resuming a session, to see what's still pending or in progress.",
-    promptSnippet: "Read the current todo list with todo_read",
+      "Read back the reasons list you're surfacing to the human (managed by todo_write). " +
+      "Use this to re-check what you're currently doing and what's left without re-sending " +
+      "the whole list — e.g. after a long tangent, or when resuming a session. This reflects " +
+      "your stated intent to the human, not a verdict on whether the work is done.",
+    promptSnippet: "Read back the reasons list you're surfacing with todo_read",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, _ctx) {
       lastWriteTurn = turnCount; // Read explicitly, so reset the reminder counter.
@@ -347,10 +358,11 @@ export default function (pi: ExtensionAPI) {
       if (turnCount - lastWriteTurn < REMIND_AFTER_TURNS) return;
       const lines = todos.map((t) => `${MARK[t.status]} ${labelOf(t)}`);
       const reminder =
-        "[todo reminder] Your current task list (manage it with todo_write):\n" +
+        "[todo reminder] The reasons list you're surfacing to the human (manage it with todo_write):\n" +
         `${lines.join("\n")}\n` +
-        `${doneCount(todos)}/${todos.length} completed. Keep exactly one task in_progress; ` +
-        "update the list as you make progress.";
+        `${doneCount(todos)}/${todos.length} shown as completed. Keep exactly one item in_progress ` +
+        "and update the list as your focus shifts, so the human stays oriented. This is a " +
+        "display of your intent, not a done-gate — completion is judged by spec-graph, not this list.";
       return {
         messages: [
           ...event.messages,
@@ -370,10 +382,10 @@ export default function (pi: ExtensionAPI) {
     ) {
       lastColdNudgeTurn = turnCount;
       const reminder =
-        "[todo reminder] You haven't started a todo list this session. If the work " +
-        "in flight is multi-step or non-trivial, consider todo_write to plan it and " +
-        "surface progress to the user. Skip this if the task is trivial or purely " +
-        "conversational — gentle reminder only, never mention it to the user.";
+        "[todo reminder] You haven't surfaced a reasons list this session. If the work " +
+        "in flight is multi-step or non-trivial, consider todo_write to show the human what " +
+        "you're doing and why. Skip this if the task is trivial or purely conversational — " +
+        "gentle reminder only, never mention it to the user.";
       return {
         messages: [
           ...event.messages,
