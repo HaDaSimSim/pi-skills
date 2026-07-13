@@ -62,7 +62,17 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getActivePersona } from "../primary-agents/index.ts";
 import { isTransientError } from "../subagents/transient.ts";
-import { getFallbackChain, nextFallbackModel, resetFallbackChain } from "./fallback-chain.ts";
+import {
+  getChainPosition,
+  getFallbackChain,
+  nextFallbackModel,
+  resetFallbackChain,
+} from "./fallback-chain.ts";
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+/** Custom entry type for durable retry-fallback state (GUI cold-browse restore). */
+const RETRY_FALLBACK_ENTRY_TYPE = "retry-fallback";
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -189,13 +199,22 @@ export default function (pi: ExtensionAPI) {
       fallbackPending = false;
       nextModelName = undefined;
       totalFallbackAttempts = 0;
+      // Clear durable retry-fallback state so GUI removes the fallback indicator.
+      pi.appendEntry(RETRY_FALLBACK_ENTRY_TYPE, { cleared: true, ts: Date.now() } as Record<
+        string,
+        unknown
+      >);
       return;
     }
 
     // Native retries exhausted (success === false).
     if (!isTransientError(lastErrorMessage)) {
-      // NON-transient — SURFACE.
+      // NON-transient — SURFACE. Clear any stale retry-fallback entry.
       reset();
+      pi.appendEntry(RETRY_FALLBACK_ENTRY_TYPE, { cleared: true, ts: Date.now() } as Record<
+        string,
+        unknown
+      >);
       return;
     }
 
@@ -240,6 +259,15 @@ export default function (pi: ExtensionAPI) {
     totalFallbackAttempts += 1;
     // Clear any pending restore — we're in a new fallback cycle.
     pendingPersonaRestore = false;
+
+    // Persist durable retry-fallback state for GUI cold-browse restore.
+    pi.appendEntry(RETRY_FALLBACK_ENTRY_TYPE, {
+      attempt: totalFallbackAttempts,
+      currentModel: personaPreferredModel ?? "",
+      chainPosition: getChainPosition(chainKey),
+      reason: lastErrorMessage ?? "Transient error",
+      ts: Date.now(),
+    } as Record<string, unknown>);
   });
 
   // ── Turn start: apply model switch if fallback is pending, OR restore persona ──
@@ -347,5 +375,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", () => {
     reset();
     resetFallbackChain();
+    pi.appendEntry(RETRY_FALLBACK_ENTRY_TYPE, { cleared: true, ts: Date.now() } as Record<
+      string,
+      unknown
+    >);
   });
 }

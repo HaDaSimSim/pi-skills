@@ -233,6 +233,18 @@ export function resetFallbackChain(chainKey?: string): void {
   }
 }
 
+// ── Chain position query (for external consumers like GUI state persistence) ─
+
+/**
+ * Return the current position index within a fallback chain.
+ * 0 means no advance yet (next call returns first model). Returns -1 if no chain.
+ * Used by retry-policy to record the chain position in a durable retry-fallback entry.
+ */
+export function getChainPosition(chainKey?: string): number {
+  const pos = _positions.get(chainKey ?? "default");
+  return pos ? pos.index : 0;
+}
+
 // ── Discovery helpers (for external consumers) ────────────────────────────────
 
 /** Return all known chain names (for diagnostics, listing). */

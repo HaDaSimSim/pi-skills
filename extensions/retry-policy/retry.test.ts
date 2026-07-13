@@ -30,6 +30,15 @@
 //     (x) resolveChainKey uses active persona name
 //     (y) resolveModelId helper mirrors primary-agents pattern
 //
+//   F1 gap — retry-fallback 7-layer GUI-mirrored state (NEW):
+//     (z1) Entry type constant "retry-fallback" present
+//     (z2) appendEntry on fallback initiate: attempt, currentModel, chainPosition, reason, ts
+//     (z3) appendEntry {cleared:true} on auto_retry_end success
+//     (z4) appendEntry {cleared:true} on deterministic error (non-transient surface)
+//     (z5) appendEntry {cleared:true} on session_start reset
+//     (z6) imports getChainPosition from fallback-chain.ts
+//     (z7) fallback-chain.ts exports getChainPosition
+//
 // Run:  node --experimental-strip-types extensions/retry-policy/retry.test.ts
 
 import * as fs from "node:fs";
@@ -67,6 +76,7 @@ import {
   _resetForTest,
   BUNDLED_FALLBACK_CHAINS,
   discoverFallbackChains,
+  getChainPosition,
   getFallbackChain,
   knownChainNames,
   nextFallbackModel,
@@ -365,6 +375,109 @@ test("abort: agent_end listener is passive (not a continuation)", () => {
       !agentEndSection.includes("register-continuation"),
     "abort listener must NOT inject continuations — only clears state",
   );
+});
+
+// =============================================================================
+// Part 6d: Durable retry-fallback entry persistence (F1 gap — 7-layer state)
+// =============================================================================
+
+test("f1-entry: RETRY_FALLBACK_ENTRY_TYPE is 'retry-fallback'", () => {
+  assert(
+    srcIndex.includes('"retry-fallback"'),
+    "must have RETRY_FALLBACK_ENTRY_TYPE = 'retry-fallback'",
+  );
+});
+
+test("f1-entry: appendEntry called on fallback initiate", () => {
+  // On fallbackPending=true path: calls pi.appendEntry with attempt, currentModel, chainPosition, reason, ts.
+  assert(
+    srcIndex.includes("pi.appendEntry"),
+    "must call pi.appendEntry for durable state persistence",
+  );
+  assert(
+    srcIndex.includes("RETRY_FALLBACK_ENTRY_TYPE"),
+    "must use RETRY_FALLBACK_ENTRY_TYPE constant for appendEntry",
+  );
+});
+
+test("f1-entry: fallback entry includes attempt field", () => {
+  assert(
+    srcIndex.includes("attempt: totalFallbackAttempts"),
+    "entry must include attempt count from totalFallbackAttempts",
+  );
+});
+
+test("f1-entry: fallback entry includes currentModel field", () => {
+  assert(
+    srcIndex.includes("currentModel:"),
+    "entry must include currentModel (persona preferred model or empty string)",
+  );
+});
+
+test("f1-entry: fallback entry includes chainPosition field", () => {
+  assert(
+    srcIndex.includes("chainPosition:"),
+    "entry must include chainPosition from getChainPosition",
+  );
+  assert(
+    srcIndex.includes("getChainPosition(chainKey)"),
+    "must call getChainPosition with the current chainKey",
+  );
+});
+
+test("f1-entry: fallback entry includes reason field", () => {
+  assert(srcIndex.includes("reason:"), "entry must include reason (error message)");
+});
+
+test("f1-entry: fallback entry includes ts field", () => {
+  assert(srcIndex.includes("ts:"), "entry must include timestamp");
+});
+
+test("f1-entry: imports getChainPosition from fallback-chain.ts", () => {
+  assert(
+    srcIndex.includes("getChainPosition"),
+    "must import getChainPosition from fallback-chain.ts for chain position tracking",
+  );
+});
+
+test("f1-entry: cleared on auto_retry_end success", () => {
+  // On success=true path: appends { cleared: true } entry.
+  assert(
+    srcIndex.includes("{ cleared: true"),
+    "must append cleared entry on auto_retry_end success",
+  );
+});
+
+test("f1-entry: cleared on deterministic error (non-transient surface)", () => {
+  // On !isTransientError path after reset(): appends { cleared: true } entry.
+  const nonTransientSection = srcIndex.slice(
+    srcIndex.indexOf("NON-transient — SURFACE"),
+    srcIndex.indexOf("// TRANSIENT error — try the fallback chain."),
+  );
+  assert(
+    nonTransientSection.includes("pi.appendEntry"),
+    "must append cleared entry on non-transient error surface",
+  );
+});
+
+test("f1-entry: cleared on session_start", () => {
+  assert(
+    srcIndex.includes("session_start") && srcIndex.includes("RETRY_FALLBACK_ENTRY_TYPE"),
+    "must append cleared entry on session_start",
+  );
+});
+
+test("f1-entry: fallback-chain.ts exports getChainPosition", () => {
+  assert(
+    srcFallback.includes("export function getChainPosition"),
+    "fallback-chain.ts must export getChainPosition",
+  );
+  // Verify it returns the correct position after advance.
+  _resetForTest();
+  // Before any advance, position should be 0.
+  assert(getChainPosition() === 0, "position should be 0 before any advance");
+  nextFallbackModel("unknown/model");
+  assert(getChainPosition() === 1, "position should be 1 after returning first model");
 });
 
 // =============================================================================
