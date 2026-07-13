@@ -1,22 +1,30 @@
-// /goal for pi — a port of Codex CLI's /goal (autonomous goal loop) to pi.
+// /ralph-loop (was /goal) for pi — an autonomous goal loop ("Ralph loop").
 //
 // Concept:
 //   Normally an agent stops once a single user prompt (agent_start ~ agent_end)
-//   completes. /goal pins "one durable goal" to the session and, until that goal
-//   is judged complete, re-injects a continuation prompt at every agent_end so
-//   the agent keeps taking turns on its own (the so-called Ralph loop).
+//   completes. /ralph-loop (aliased as /goal for back-compat) pins "one durable
+//   goal" to the session and, until that goal is judged complete, re-injects a
+//   continuation prompt at every agent_end so the agent keeps taking turns on
+//   its own (the so-called Ralph loop).
 //
-// Loop engine:
+// Loop engine (Wave 2 reframe):
 //   - /goal <objective> sets the goal and injects the first prompt via sendUserMessage.
-//   - When that turn ends (agent_end), if the goal is still "pursuing", re-inject the continuation.
-//   - The loop stops when the model calls the goal_done / goal_blocked tool, the user pauses/clears,
-//     or the token budget / max iteration count is reached.
+//   - Continuation is registered as a CONTINUATION INTENT with the hook-coordinator
+//     arbiter (hook-coordinator:register-continuation). The arbiter calls decide()
+//     at each agent_end and injects exactly ONE continuation per edge.
+//   - The RAW pi.on("agent_end") handler has been REMOVED — the coordinator owns
+//     agent_end now (core Wave 2 guardrail).
+//   - The subagent hold is provided GLOBALLY by the arbiter (task 4) — ralph's
+//     decide() does NOT re-check subagents. The arbiter holds while
+//     subagents:running > 0 and injects a single continuation when done.
+//   - The loop stops when the model calls the goal_done / goal_blocked tool, the
+//     user pauses/clears, or the goal status changes from "pursuing".
 //
 // Persistence:
-//   Goal state is recorded to the session via pi.appendEntry and restored at session_start,
-//   so the goal survives a /reload or restart.
+//   Goal state is recorded to the session via pi.appendEntry and restored at
+//   session_start, so the goal survives a /reload or restart.
 //
-// Install: ~/.pi/agent/extensions/goal/index.ts (symlinked by make install)
+// Install: ~/.pi/agent/extensions/ralph-loop/index.ts (symlinked by make install)
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -38,6 +46,38 @@ interface GoalState {
 // goal_blocked, the user's pause/clear, and (if configured) the token budget.
 const STATE_ENTRY_TYPE = "goal-state";
 
+// ── Loop instructions (prompt fragments) ──────────────────────────────
+
+const loopInstructions =
+  "When the goal is fully achieved and you have verified it, call the goal_done tool with a short evidence summary. " +
+  "If you are blocked and cannot make progress without the user, call the goal_blocked tool with the reason. " +
+  "Otherwise, take the next concrete step now and keep going without waiting for further input.";
+
+const loopInstructionsNoBlock =
+  "When the goal is fully achieved and you have verified it, call the goal_done tool with a short evidence summary. " +
+  "You may NOT stop for being blocked: the goal_blocked tool is disabled for this run and will be ignored. " +
+  "If you hit an obstacle, make a reasonable assumption, try an alternative approach, and keep going without waiting for the user. " +
+  "Take the next concrete step now.";
+
+const instructionsFor = (g: GoalState): string =>
+  g.ignoreBlocked ? loopInstructionsNoBlock : loopInstructions;
+
+const buildPrompt = (g: GoalState, kind: "start" | "continue"): string => {
+  if (kind === "start") {
+    return (
+      `You are now working under a durable goal. Stay on it across turns until it is met.\n\n` +
+      `GOAL: ${g.objective}\n\n` +
+      instructionsFor(g)
+    );
+  }
+  return (
+    `[ralph loop · iteration ${g.iteration}]\n` +
+    `Active goal: ${g.objective}\n\n` +
+    `Keep working toward this goal. Do not stop until the verifiable stopping condition is met. ` +
+    instructionsFor(g)
+  );
+};
+
 export default function (pi: ExtensionAPI) {
   // Don't register the goal in child subagent processes (`pi -p`, non-interactive).
   // /goal is an autonomous loop (Ralph loop) a human starts, so it's unnecessary for a one-shot -p child,
@@ -46,19 +86,6 @@ export default function (pi: ExtensionAPI) {
   if (process.env.PI_SUBAGENT) return;
 
   let goal: GoalState | null = null;
-
-  // ── subagents integration ──────────────────────────────────
-  // The subagents extension broadcasts the in-progress count via "subagents:running".
-  // While background subagents are running, the continuation re-injection at agent_end is
-  // held off (see the agent_end handler below). That keeps the main agent from running away
-  // without waiting for results. When the last subagent finishes, the
-  // "[subagent ... finished]" message subagents sends creates a new turn, and at that turn's
-  // agent_end (now running==0) the loop naturally resumes. So here we only need to keep the
-  // counter, with no separate resume kick (avoids double injection).
-  let runningSubagents = 0;
-  pi.events.on("subagents:running", (payload: { running?: number }) => {
-    runningSubagents = typeof payload?.running === "number" ? payload.running : 0;
-  });
 
   // ── Status display / persistence ───────────────────────────────
 
@@ -123,113 +150,29 @@ export default function (pi: ExtensionAPI) {
     return total;
   };
 
-  // ── Prompt builder ────────────────────────────────────
+  // ── Continuation intent (registered with hook-coordinator arbiter) ──────
 
-  const loopInstructions =
-    "When the goal is fully achieved and you have verified it, call the goal_done tool with a short evidence summary. " +
-    "If you are blocked and cannot make progress without the user, call the goal_blocked tool with the reason. " +
-    "Otherwise, take the next concrete step now and keep going without waiting for further input.";
+  const intent = {
+    name: "ralph-loop",
+    priority: 205, // loop-engine band (200-299); 205 sits below ultrawork (210) and above catch-all loops
+    decide: (): { prompt: string; deliverAs?: "followUp" } | undefined => {
+      // Only continue if a goal is actively being pursued.
+      if (!goal || goal.status !== "pursuing") return undefined;
 
-  // --no-block mode: clearly tell the model that goal_blocked is disabled.
-  const loopInstructionsNoBlock =
-    "When the goal is fully achieved and you have verified it, call the goal_done tool with a short evidence summary. " +
-    "You may NOT stop for being blocked: the goal_blocked tool is disabled for this run and will be ignored. " +
-    "If you hit an obstacle, make a reasonable assumption, try an alternative approach, and keep going without waiting for the user. " +
-    "Take the next concrete step now.";
+      // Increment iteration and persist (the arbiter handles injection + subagent hold).
+      goal.iteration += 1;
+      persist();
 
-  const instructionsFor = (g: GoalState): string =>
-    g.ignoreBlocked ? loopInstructionsNoBlock : loopInstructions;
-
-  const buildPrompt = (g: GoalState, kind: "start" | "continue"): string => {
-    if (kind === "start") {
-      return (
-        `You are now working under a durable goal. Stay on it across turns until it is met.\n\n` +
-        `GOAL: ${g.objective}\n\n` +
-        instructionsFor(g)
-      );
-    }
-    return (
-      `[goal loop · iteration ${g.iteration}]\n` +
-      `Active goal: ${g.objective}\n\n` +
-      `Keep working toward this goal. Do not stop until the verifiable stopping condition is met. ` +
-      instructionsFor(g)
-    );
+      const prompt = buildPrompt(goal, "continue");
+      return { prompt };
+    },
   };
 
-  // ── Loop re-injection ───────────────────────────────────
-
-  // Defer by one tick to safely catch the timing where it transitions to idle right after agent_end.
-  const kick = (ctx: ExtensionContext, kind: "start" | "continue") => {
-    setTimeout(() => {
-      if (goal?.status !== "pursuing") return;
-      const prompt = buildPrompt(goal, kind);
-      if (ctx.isIdle()) {
-        pi.sendUserMessage(prompt);
-      } else {
-        // If still streaming, append after the current turn ends.
-        pi.sendUserMessage(prompt, { deliverAs: "followUp" });
-      }
-    }, 0);
-  };
-
-  // At the end of every prompt: if a goal is being tracked, re-inject the next step.
-  pi.on("agent_end", async (event, ctx) => {
-    if (goal?.status !== "pursuing") return;
-
-    // If the user aborted with Esc, stop the loop. An abort is a "stop" signal, so
-    // don't auto re-inject; transition to paused and let the user resume manually.
-    // Determined from the last assistant message's stopReason.
-    const msgs = event.messages ?? [];
-    let lastAssistant: AssistantMessage | undefined;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const m = msgs[i] as { role?: string };
-      if (m.role === "assistant") {
-        lastAssistant = m as AssistantMessage;
-        break;
-      }
-    }
-    if (lastAssistant?.stopReason === "aborted") {
-      goal.status = "paused";
-      goal.note = "aborted by user (Esc) — /goal resume to continue";
-      persist();
-      setStatus(ctx);
-      if (ctx.hasUI) ctx.ui.notify("⏸ Aborted (Esc). Use /goal resume to continue.", "info");
-      return;
-    }
-
-    // Token budget exceeded → stop
-    if (goal.tokenBudget && cumulativeTokens(ctx) >= goal.tokenBudget) {
-      goal.status = "budget-limited";
-      goal.note = `token budget ${goal.tokenBudget} reached`;
-      persist();
-      setStatus(ctx);
-      pi.events.emit("goal:status-change", {
-        status: "budget-limited",
-        objective: goal.objective,
-        note: goal.note,
-      });
-      if (ctx.hasUI)
-        ctx.ui.notify(`Goal stopped: token budget (${goal.tokenBudget}) reached.`, "warning");
-      return;
-    }
-
-    // If background subagents are still running, hold off the continuation.
-    // Just returning is enough because: every time subagents finishes a run, it inserts a
-    // "[subagent ... finished]" message via sendUserMessage, creating a new turn.
-    // At that turn's agent_end, runningSubagents has already decremented, so once the last
-    // subagent finishes (running→0) the loop naturally resumes. With several of them,
-    // it repeats hold-off→resume each time until the last one. (No separate resume kick —
-    // that would double-inject the continuation alongside the finished turn.)
-    if (runningSubagents > 0) {
-      setStatus(ctx);
-      return;
-    }
-
-    // No iteration limit (Ralph loop). Runs to completion.
-    goal.iteration += 1;
-    persist();
-    setStatus(ctx);
-    kick(ctx, "continue");
+  // Register with the coordinator. Emit immediately (works if coordinator already loaded)
+  // and also on hook-coordinator:ready as a race-condition fallback. Dedup by name.
+  pi.events.emit("hook-coordinator:register-continuation", intent);
+  pi.events.on("hook-coordinator:ready", () => {
+    pi.events.emit("hook-coordinator:register-continuation", intent);
   });
 
   // ── Goal-termination tools (called by the model) ────────────────────
@@ -253,7 +196,7 @@ export default function (pi: ExtensionAPI) {
         goal.note = params.summary;
         persist();
         setStatus(ctx);
-        pi.events.emit("goal:status-change", {
+        pi.events.emit("ralph:status-change", {
           status: "achieved",
           objective: goal.objective,
           note: params.summary,
@@ -301,7 +244,7 @@ export default function (pi: ExtensionAPI) {
         goal.note = params.reason;
         persist();
         setStatus(ctx);
-        pi.events.emit("goal:status-change", {
+        pi.events.emit("ralph:status-change", {
           status: "blocked",
           objective: goal.objective,
           note: params.reason,
@@ -403,7 +346,8 @@ export default function (pi: ExtensionAPI) {
         persist();
         setStatus(ctx);
         ctx.ui.notify("▶ Resuming goal.", "info");
-        kick(ctx, "continue");
+        // Kickstart: the coordinator arbiter will handle subsequent continuations.
+        pi.sendUserMessage(buildPrompt(goal, "continue"));
         return;
       }
       if (sub === "clear") {
@@ -435,7 +379,8 @@ export default function (pi: ExtensionAPI) {
       } else {
         ctx.ui.notify(`🎯 Goal set: ${objective}${ignoreBlocked ? "  (no-block)" : ""}`, "info");
       }
-      kick(ctx, "start");
+      // Kickstart the first turn. Subsequent continuations go through the coordinator arbiter.
+      pi.sendUserMessage(buildPrompt(goal, "start"));
     },
     getArgumentCompletions: (prefix: string) => {
       const subs = ["pause", "resume", "clear", "status"];

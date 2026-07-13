@@ -26,7 +26,7 @@ Extensions hook pi's lifecycle and surface. Observed patterns in this repo:
 
 - **Lifecycle hooks**: `session_start`, `turn_start`, `before_agent_start`,
   `agent_end`, `tool_call`, `context`, `session_shutdown`.
-- **Slash commands**: e.g. `/btw`, `/goal`, `/takeover`.
+- **Slash commands**: e.g. `/btw`, `/goal` (ralph-loop), `/takeover`.
 - **Tools**: e.g. `questionnaire`, `goal_done`/`goal_blocked`,
   `spawn_subagents` & friends. Tools may be added dynamically (goal adds its
   tools only while a goal is live).
@@ -34,8 +34,8 @@ Extensions hook pi's lifecycle and surface. Observed patterns in this repo:
   viewer.
 - **Renderers**: `registerMessageRenderer` for custom message types (e.g.
   `ui-cosmetics`' `turn-meta`, `question`'s custom `renderCall`/`renderResult`).
-- **Event bus**: extensions can emit/listen — `goal` emits
-  `goal:status-change`, `telegram` listens for it.
+- **Event bus**: extensions can emit/listen — `ralph-loop` emits
+  `ralph:status-change`, `telegram` listens for it.
 
 ## Imports
 

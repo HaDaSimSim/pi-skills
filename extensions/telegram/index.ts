@@ -2,7 +2,7 @@
 //
 // Notification triggers:
 //   - agent_end: when a task that took at least a certain time (default 30s) completes
-//   - goal:status-change: when a goal becomes achieved/blocked/budget-limited
+//   - ralph:status-change: when a ralph-loop goal becomes achieved/blocked/budget-limited
 //   - when the questionnaire tool is called: notify that user input is awaited
 //
 // Config: extensions/telegram/.env
@@ -187,9 +187,9 @@ export default function (pi: ExtensionAPI) {
     sendTelegram(config, `✅ *Task complete* (${dur})\n📁 ${project}${session}\n🤖 ${model}`);
   });
 
-  // goal integration: when the goal extension emits an event, receive it and notify
+  // ralph-loop integration: when the ralph-loop extension emits a status-change event, notify
   unsubs.push(
-    pi.events.on("goal:status-change", (data) => {
+    pi.events.on("ralph:status-change", (data) => {
       const { status, objective, note } = data as {
         status: string;
         objective: string;
