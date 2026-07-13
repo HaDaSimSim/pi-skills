@@ -17,7 +17,7 @@ ALL_SKILLS     := apple-docs ast-grep context7 grep-search update-models update-
 # Extensions are TypeScript files or directories under `extensions/`. Each
 # entry here must match either `extensions/<name>.ts` or `extensions/<name>/`
 # (a directory containing `index.ts` or a `package.json` with `pi.extensions`).
-ALL_EXTENSIONS := hook-coordinator session-lock ui-cosmetics question ralph-loop telegram subagents btw stats file-guards todo async-bash toolcall-nudge browser-control aside primary-agents ultrawork spec-graph planning-cast evidence
+ALL_EXTENSIONS := hook-coordinator session-lock ui-cosmetics question ralph-loop telegram subagents btw stats file-guards todo async-bash toolcall-nudge browser-control aside primary-agents ultrawork spec-graph planning-cast evidence retry-policy
 LOCAL_CFG      := skills.local.json
 
 # Compute disabled set per category. Each call shells out to the helper
