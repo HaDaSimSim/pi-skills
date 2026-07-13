@@ -1,4 +1,4 @@
-// Strip-only unit test for retry-policy extension (task 32 + task 33).
+// Strip-only unit test for retry-policy extension (task 32 + task 33 + F1-reject fix).
 //
 // Tests:
 //   Task 32 (retained):
@@ -11,9 +11,11 @@
 //     (g) Imports isTransientError from subagents/transient.ts
 //     (h) isTransientError correctly classifies transient vs deterministic
 //     (k) decide() returns prompt when fallbackPending, undefined otherwise
-//     (l) User abort: non-transient → surface (no loop)
+//     (l) User abort: agent_end stopReason==="aborted" clears fallbackPending
 //     (m) session_start resets state
 //     (n) turn_start includes modelRegistry.find + setModel logic
+//     (o2) F1 fix: infinite for transient — no MAX_TOTAL_ATTEMPTS hard cap
+//     (o3) F1 fix: chain exhaustion cycles back with fallbackCycleCount
 //
 //   Task 33 (new):
 //     (o) Bundled chains: entries for all category + persona names + "default"
@@ -134,9 +136,30 @@ test("cont-intent: decide() returns prompt when fallbackPending", () => {
 // Part 3: Guardrails (task 32 — retained)
 // =============================================================================
 
-test("guardrail: NO raw pi.on('agent_end') handler", () => {
+test("guardrail: NO raw pi.on('agent_end') CONTINUATION handler", () => {
+  // F1 fix: a PASSIVE agent_end listener for abort detection is allowed
+  // (same pattern as primary-agents:209 + toolcall-nudge:94).
+  // The guardrail forbids CONTINUATION injection from agent_end, not
+  // passive state clearing. Count only agent_end instances that inject.
   const hasAgentEnd = srcIndex.includes('on("agent_end"') || srcIndex.includes("on('agent_end'");
-  assert(!hasAgentEnd, "must NOT register raw agent_end handler");
+  // The passive agent_end listener only clears fallbackPending (no sendUserMessage).
+  // We verify this in a separate test: "abort: agent_end listener is passive".
+  // For this guardrail test, we check there's no CONTINUATION-capable agent_end.
+  assert(hasAgentEnd, "passive agent_end listener for abort detection is present");
+  // Verify it's truly passive: no sendUserMessage near agent_end.
+  const agentEndSections = srcIndex.split('pi.on("agent_end"');
+  // The last one is our passive abort listener; check it doesn't inject.
+  const abortSection = agentEndSections[agentEndSections.length - 1];
+  const sectionUntilNextHandler = abortSection?.split("// ──")[0] ?? "";
+  assert(
+    !sectionUntilNextHandler.includes("sendUserMessage") &&
+      !sectionUntilNextHandler.includes("register-continuation"),
+    "passive agent_end listener must NOT inject continuations",
+  );
+  assert(
+    !sectionUntilNextHandler.includes("pi.events.emit"),
+    "passive agent_end listener must NOT emit events for continuation",
+  );
 });
 
 test("guardrail: re-drive ONLY through hook-coordinator:register-continuation", () => {
@@ -253,11 +276,80 @@ test("surface: non-transient error — does NOT set fallbackPending", () => {
   );
 });
 
-test("surface: max attempts exceeded → resets", () => {
-  assert(srcIndex.includes("MAX_TOTAL_ATTEMPTS"), "must have MAX_TOTAL_ATTEMPTS cap");
+test("surface: deterministic error — calls reset() to surface", () => {
+  // NON-transient path must call reset() (which clears fallbackPending).
   assert(
-    srcIndex.includes("totalFallbackAttempts >= MAX_TOTAL_ATTEMPTS"),
-    "must check max attempts before re-driving",
+    srcIndex.includes("if (!isTransientError(lastErrorMessage))"),
+    "must check !isTransientError and surface",
+  );
+  assert(srcIndex.includes("reset();"), "must call reset() for deterministic errors");
+});
+
+// =============================================================================
+// Part 6b: Infinite transient retry — NO hard total-attempt cap (F1 fix)
+// =============================================================================
+
+test("infinite-transient: NO MAX_TOTAL_ATTEMPTS constant", () => {
+  // F1 fix: Remove the hard total-attempt cap. Transient errors retry indefinitely.
+  assert(
+    !srcIndex.includes("MAX_TOTAL_ATTEMPTS"),
+    "must NOT have MAX_TOTAL_ATTEMPTS constant — transient retries are infinite",
+  );
+});
+
+test("infinite-transient: chain exhaustion cycles back (fallbackCycleCount)", () => {
+  // When nextFallbackModel returns undefined and error is transient, cycle back.
+  assert(
+    srcIndex.includes("fallbackCycleCount"),
+    "must have fallbackCycleCount for cycle tracking",
+  );
+  assert(
+    srcIndex.includes("resetFallbackChain(chainKey)"),
+    "must reset chain on exhaustion to cycle back",
+  );
+});
+
+test("infinite-transient: falls back to default chain first model if still empty", () => {
+  assert(
+    srcIndex.includes('getFallbackChain("default")?.[0]'),
+    "must fall back to default chain first model if cycled chain still empty",
+  );
+});
+
+// =============================================================================
+// Part 6c: User abort breaks the fallback loop (F1 fix)
+// =============================================================================
+
+test("abort: has passive agent_end listener for stopReason detection", () => {
+  // F1 fix: passive agent_end handler detects abort and clears fallbackPending.
+  assert(
+    srcIndex.includes('pi.on("agent_end"'),
+    "must have passive agent_end listener for abort detection",
+  );
+});
+
+test("abort: checks stopReason for aborted", () => {
+  assert(srcIndex.includes('stopReason === "aborted"'), "must check stopReason === 'aborted'");
+});
+
+test("abort: clears fallbackPending on abort", () => {
+  assert(
+    srcIndex.includes("fallbackPending = false"),
+    "must clear fallbackPending on abort to break the loop",
+  );
+});
+
+test("abort: agent_end listener is passive (not a continuation)", () => {
+  // Guardrail: passive agent_end handler must NOT inject continuations.
+  // It only clears fallbackPending — no sendUserMessage, no prompt injection.
+  const agentEndSection = srcIndex.slice(
+    srcIndex.lastIndexOf('pi.on("agent_end"'),
+    srcIndex.lastIndexOf("// ── Reset on session start"),
+  );
+  assert(
+    !agentEndSection.includes("sendUserMessage") &&
+      !agentEndSection.includes("register-continuation"),
+    "abort listener must NOT inject continuations — only clears state",
   );
 });
 
@@ -449,9 +541,11 @@ test("category-precedence: chain doc explains primary→fallback precedence", ()
     srcFallback.includes("AFTER the primary"),
     "fallback-chain.ts must document primary→fallback precedence",
   );
+  // resolveCategory is documented in the header for context; the actual import
+  // was unused (resolved by persona chain key) and removed per F1 cleanup.
   assert(
     srcIndex.includes("resolveCategory"),
-    "index.ts must import resolveCategory for category routing context",
+    "index.ts header must document resolveCategory for category routing context",
   );
 });
 

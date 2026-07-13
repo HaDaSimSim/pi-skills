@@ -11,16 +11,20 @@
 //      b. TRANSIENT → find next fallback model via nextFallbackModel(currentModel, chainKey)
 //         - chainKey is resolved from the active persona name or a category context
 //         - If found: store it, mark fallbackPending, re-drive via coordinator
-//         - If not: surface (break — chain exhausted, error goes terminal)
+//         - If not: cycle back to chain start (infinite for transient errors)
 //      c. NON-transient (auth/bad-request/invalid-model) → SURFACE (do not loop)
 //   3. Fallback re-drive: registered as a CONTINUATION INTENT with the
 //      hook-coordinator arbiter (priority 204). The arbiter calls decide() at
 //      each agent_end; if fallbackPending, returns a re-drive prompt. Model
 //      switch happens at turn_start (which has ctx.modelRegistry).
-//   4. Loop: for transient errors, the cycle repeats with each new model until
-//      success or chain exhausted. Deterministic errors break immediately.
-//   5. User abort: pressing Esc stops the turn; the loop tries at most once per
-//      edge (one-per-edge arbiter guarantee). No uninterruptible spin.
+//   4. Loop: for transient errors, the cycle repeats with each new model; when
+//      the chain is exhausted, it CYCLES back to the chain start with backoff
+//      (infinite for transient errors, never the hard ~3-attempt stop).
+//      Deterministic errors break immediately.
+//   5. User abort: pressing Esc stops the turn. A passive agent_end listener
+//      detects stopReason==="aborted" and clears fallbackPending, so the
+//      arbiter's next decide() returns undefined — loop breaks cleanly.
+//      No uninterruptible spin.
 //   6. Persona-model reconcile (task 33):
 //      - Before the first fallback in a chain, the active persona's preferred
 //        model is saved (personaPreferredModel).
@@ -57,9 +61,8 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getActivePersona } from "../primary-agents/index.ts";
-import { resolveCategory } from "../subagents/categories.ts";
 import { isTransientError } from "../subagents/transient.ts";
-import { nextFallbackModel, resetFallbackChain } from "./fallback-chain.ts";
+import { getFallbackChain, nextFallbackModel, resetFallbackChain } from "./fallback-chain.ts";
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -72,7 +75,7 @@ let fallbackPending = false;
 /** The next model name to try (provider/modelId format, e.g. "relay/claude-opus-4.8"). */
 let nextModelName: string | undefined;
 
-/** Total fallback attempts across models (for observability / max-attempts cap). */
+/** Total fallback attempts across models (for observability only — no hard cap). */
 let totalFallbackAttempts = 0;
 
 /** The active persona's preferred model, saved before the first fallback in a chain. */
@@ -88,10 +91,11 @@ let pendingPersonaRestore = false;
 let restoreWasAttempted = false;
 
 /**
- * Maximum total attempts across all models before giving up.
- * Prevents infinite model-cycling on persistent transient errors.
+ * Full chain-exhaustion cycles completed so far (resets on success).
+ * Tracks how many times the fallback chain has been exhausted and cycled.
+ * Each cycle incurs natural backoff (full model call + native retries).
  */
-const MAX_TOTAL_ATTEMPTS = 10;
+let fallbackCycleCount = 0;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -100,6 +104,7 @@ function reset(): void {
   fallbackPending = false;
   nextModelName = undefined;
   totalFallbackAttempts = 0;
+  fallbackCycleCount = 0;
   personaPreferredModel = undefined;
   pendingPersonaRestore = false;
   restoreWasAttempted = false;
@@ -206,13 +211,27 @@ export default function (pi: ExtensionAPI) {
     const chainKey = resolveChainKey();
     // Use the current model name from the persona (or fallback to empty for chain-reset).
     const currentModel = personaPreferredModel ?? "";
-    const next = nextFallbackModel(currentModel, chainKey);
+    let next = nextFallbackModel(currentModel, chainKey);
 
-    if (!next || totalFallbackAttempts >= MAX_TOTAL_ATTEMPTS) {
-      // Chain exhausted or max attempts reached — surface.
-      resetFallbackChain();
-      reset();
-      return;
+    if (!next) {
+      // Chain exhausted on transient error — cycle back to chain start.
+      // This is INFINITE for transient errors (NO hard total-attempt cap).
+      // Each cycle incurs a full model call + native retries, providing natural backoff.
+      resetFallbackChain(chainKey);
+      fallbackCycleCount += 1;
+
+      // Re-resolve from the cycled chain start.
+      next = nextFallbackModel(currentModel, chainKey);
+      if (!next) {
+        // Fallback to the default chain's first model if still empty.
+        const defaultFirst = getFallbackChain("default")?.[0];
+        if (!defaultFirst) {
+          resetFallbackChain();
+          reset();
+          return;
+        }
+        next = defaultFirst;
+      }
     }
 
     // Fallback available — mark pending for the coordinator continuation.
@@ -287,8 +306,9 @@ export default function (pi: ExtensionAPI) {
       if (!fallbackPending) return undefined;
 
       const modelLabel = nextModelName ?? "next model";
+      const cycleInfo = fallbackCycleCount > 0 ? ` (cycle ${fallbackCycleCount})` : "";
       const prompt =
-        `[retry-policy fallback #${totalFallbackAttempts}]\n` +
+        `[retry-policy fallback #${totalFallbackAttempts}${cycleInfo}]\n` +
         `The previous turn failed with a transient error after native same-model retries were exhausted.\n` +
         `Falling back to model: ${modelLabel}.\n\n` +
         `Continue from where you left off — same task, same goal. ` +
@@ -302,6 +322,17 @@ export default function (pi: ExtensionAPI) {
   pi.events.emit("hook-coordinator:register-continuation", intent);
   pi.events.on("hook-coordinator:ready", () => {
     pi.events.emit("hook-coordinator:register-continuation", intent);
+  });
+
+  // ── User-abort detection: break the fallback loop on abort ─────────────
+  // PASSIVE agent_end listener — only clears state, does NOT inject continuations.
+  // This is allowed under the guardrail (same pattern as primary-agents:209 + toolcall-nudge:94).
+  pi.on("agent_end", (event: unknown) => {
+    const ev = event as { stopReason?: string; turn: { stopReason?: string } } | undefined;
+    const stopReason = ev?.stopReason ?? ev?.turn?.stopReason;
+    if (stopReason === "aborted") {
+      fallbackPending = false;
+    }
   });
 
   // ── Reset on session start ──────────────────────────────────────────────
