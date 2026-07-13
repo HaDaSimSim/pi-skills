@@ -28,7 +28,7 @@ pre-push:
   parallel: true
   jobs:
     - name: typecheck
-      run: ./scripts/check-extensions.py extensions/btw extensions/file-guards extensions/goal extensions/question extensions/session-lock extensions/stats extensions/subagents extensions/telegram extensions/ui-cosmetics
+      run: ./scripts/check-extensions.py extensions/btw extensions/evidence extensions/file-guards extensions/hook-coordinator extensions/planning-cast extensions/primary-agents extensions/question extensions/ralph-loop extensions/retry-policy extensions/session-lock extensions/shared extensions/spec-graph extensions/stats extensions/subagents extensions/telegram extensions/ultrawork extensions/ui-cosmetics
 
     - name: go-vet
       run: go vet ./...
