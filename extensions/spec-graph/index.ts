@@ -14,11 +14,10 @@
 // Follows the no-op-quietly philosophy from extensions/AGENTS.md.
 //
 // EXTENSION ENTRYPOINT: The default export is a pi extension factory that wires
-// the done-gate continuation intent at load time. pi loads index.ts (not
-// done-gate.ts) — without this default export, spec-graph errors as "does not
-// export a valid factory function". The done-gate's own export default is
-// harmless (never called by pi directly) but preserved for standalone testing.
-// The CANONICAL entrypoint is this file (index.ts).
+// the done-gate continuation intent at load time. pi loads index.ts — this is
+// the CANONICAL and ONLY spec-graph entrypoint. done-gate.ts is a pure helper
+// module (named exports only) — it MUST NOT have its own default export, or pi
+// would load it as a separate extension and registerDoneGate would fire twice.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";

@@ -224,13 +224,15 @@ export function registerDoneGate(pi: ExtensionAPI, cwd: string): void {
   });
 }
 
-// ── Extension entrypoint ─────────────────────────────────────────────────────
-
-export default function (pi: ExtensionAPI) {
-  registerDoneGate(pi, process.cwd());
-}
-
 // ── Test helpers ─────────────────────────────────────────────────────────────
+//
+// NOTE: This file has NO default export. It is a pure helper module — only
+// index.ts is the spec-graph extension entrypoint. If a default export were
+// present here, pi's extension loader would discover done-gate.ts as a
+// separate extension, causing registerDoneGate to fire twice (once via
+// index.ts importing it, and once via pi loading done-gate.ts directly).
+// The arbiter dedups by name so it's not fatal, but it's unclean: a helper
+// module MUST NOT masquerade as an extension. ─────────────────────────────────────────────────────────────
 
 export function _resetForTest(): void {
   consecutiveUnmet = 0;
